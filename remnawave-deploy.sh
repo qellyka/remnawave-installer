@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Remnawave deploy script — Nginx + nftables edition, interactive installer
 # by qellyka
+#
+# NOTE on the write_*_script() functions below (write_provision_script,
+# write_bootstrap_script, write_list_nodes_script): these embed small Python
+# helper scripts as heredocs. They are self-contained — this ONE file (plus
+# decoy-cdn/index.html) is everything that needs to live in the GitHub repo.
+# The Python helpers write themselves to disk automatically at runtime; you
+# never need to upload or manage them separately.
 set -euo pipefail
 
 trap 'echo -e "\033[1;31m[ERROR]\033[0m Error at line $LINENO"; exit 1' ERR
@@ -45,18 +52,20 @@ banner
 echo "Что вы хотите установить?"
 echo ""
 echo "  1) Панель Remnawave (Panel)"
-echo "  2) Ноду Remnawave (Node)"
+echo "  2) Ноду Remnawave (Node) — с нуля, ставим агента на новый сервер"
+echo "  3) Наши инбаунды на уже существующую ноду (агент уже подключён к панели)"
 echo ""
-read -rp "Введите номер [1-2]: " MODE_CHOICE
+read -rp "Введите номер [1-3]: " MODE_CHOICE
 case "$MODE_CHOICE" in
   1) MODE="panel" ;;
-  2) MODE="node" ;;
+  2) MODE="node"; EXISTING_NODE=false ;;
+  3) MODE="node"; EXISTING_NODE=true ;;
   *) die "Некорректный выбор" ;;
 esac
 echo ""
 
 # Место для будущих режимов (naiveproxy, mieru, olcRTC и т.д.) — когда появятся
-# свои управляющие скрипты для них, здесь добавится пункт 3), 4)...
+# свои управляющие скрипты для них, здесь добавится пункт 4), 5)...
 
 #################################
 # COMMON HELPERS
@@ -249,6 +258,47 @@ try_fetch_inbound_templates() {
   else
     warn "Не удалось скачать шаблон $TEMPLATE_NAME"
   fi
+}
+
+write_list_nodes_script() {
+  cat > /tmp/remnawave_list_nodes.py <<'LISTEOF'
+#!/usr/bin/env python3
+"""
+Remnawave node lister — by qellyka
+Fetches existing nodes from the panel and prints them as NUMBER|UUID|NAME|ADDRESS|CONNECTED
+so a bash script can present a pick-by-number menu.
+"""
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+
+PANEL_URL = os.environ.get("RW_PANEL_URL", "")
+API_TOKEN = os.environ.get("RW_API_TOKEN", "")
+
+if not all([PANEL_URL, API_TOKEN]):
+    print("[ERROR] Missing RW_PANEL_URL / RW_API_TOKEN", file=sys.stderr)
+    sys.exit(1)
+
+req = urllib.request.Request(PANEL_URL.rstrip("/") + "/api/nodes", method="GET")
+req.add_header("Authorization", f"Bearer {API_TOKEN}")
+try:
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode())
+except (urllib.error.URLError, urllib.error.HTTPError) as e:
+    print(f"[ERROR] Could not fetch node list: {e}", file=sys.stderr)
+    sys.exit(1)
+
+nodes = data.get("response", [])
+if not nodes:
+    print("[ERROR] No nodes found in this panel", file=sys.stderr)
+    sys.exit(2)
+
+for i, n in enumerate(nodes, start=1):
+    connected = "connected" if n.get("isConnected") else "disconnected"
+    print(f"{i}|{n['uuid']}|{n.get('name','?')}|{n.get('address','?')}|{connected}")
+LISTEOF
 }
 
 write_provision_script() {
@@ -602,6 +652,13 @@ PYEOF
 # PANEL MODE (interactive)
 #################################
 install_panel() {
+  echo "Перед этим шагом нужны две A-записи в DNS, указывающие на IP этого сервера:"
+  echo "  - домен для панели (например panel.example.com)"
+  echo "  - домен для страницы подписки (например sub.example.com)"
+  echo "Если уже создал — просто продолжай, ничего страшного, если ещё нет — сделай это"
+  echo "в панели DNS у регистратора прямо сейчас (займёт минуту), потом возвращайся."
+  echo "Скрипт сам проверит, резолвятся ли они правильно, перед выпуском сертификатов."
+  echo ""
   read -rp "Домен для панели администратора (например panel.example.com): " PANEL_DOMAIN
   read -rp "Домен для страницы подписки (например sub.example.com): " SUB_DOMAIN
   read -rp "Порт SSH, который нельзя закрывать [22]: " SSH_PORT
@@ -780,27 +837,74 @@ EOF
 }
 
 install_node() {
-  echo "Что делаем с этой нодой?"
-  echo "  1) Просто подключить ноду (SECRET_KEY уже есть на руках)"
-  echo "  2) Установить 4 базовых инбаунда (Reality+TCP, Reality+gRPC, Reality+XHTTP, Hysteria2)"
-  echo "  3) Настроить связку с CDN (TLS+XHTTP через CDN, обход белых списков)"
-  echo "  4) Всё сразу — варианты 2 и 3 вместе"
-  read -rp "Введите номер [1-4]: " NODE_SETUP_CHOICE
-  [[ "$NODE_SETUP_CHOICE" =~ ^[1-4]$ ]] || die "Некорректный выбор"
-  echo ""
+  if [[ "${EXISTING_NODE:-false}" == true ]]; then
+    echo "Применяем инбаунды к уже существующей, подключённой ноде."
+    echo "Нужен API-токен панели — если ещё не создавал, зайди в панель:"
+    echo "  Settings -> API Tokens -> Create, скопируй значение, потом вернись сюда."
+    echo "Если токен уже есть — просто вставь его."
+    echo ""
+    read -rp "URL панели (например https://panel.example.com): " RW_PANEL_URL
+    read -rp "API-токен: " RW_API_TOKEN
+    [[ -n "$RW_PANEL_URL" && -n "$RW_API_TOKEN" ]] || die "URL панели и API-токен обязательны"
+    echo ""
 
-  read -rp "IP панели, для ограничения доступа к ноде (Enter — пропустить, менее безопасно): " PANEL_IP
-  read -rp "NODE_PORT [3000]: " NODE_PORT; NODE_PORT=${NODE_PORT:-3000}
-  read -rp "XTLS_API_PORT [61000]: " XTLS_API_PORT; XTLS_API_PORT=${XTLS_API_PORT:-61000}
-  read -rp "Порт SSH, который нельзя закрывать [22]: " SSH_PORT; SSH_PORT=${SSH_PORT:-22}
-  echo ""
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y -qq python3 jq curl >/dev/null 2>&1
+    write_list_nodes_script
 
-  echo "Блокировать входящий ICMP (ping) на этой ноде?"
-  echo "  1) Да (рекомендуется — обычные клиентские IP не отвечают на пинг)"
-  echo "  2) Нет"
-  read -rp "Введите номер [1-2]: " ICMP_CHOICE
-  BLOCK_ICMP=false; [[ "$ICMP_CHOICE" == "1" ]] && BLOCK_ICMP=true
-  echo ""
+    log "Получаю список нод из панели..."
+    NODES_LIST=$(RW_PANEL_URL="$RW_PANEL_URL" RW_API_TOKEN="$RW_API_TOKEN" python3 /tmp/remnawave_list_nodes.py) \
+      || die "Не удалось получить список нод — проверь URL панели и токен"
+
+    echo ""
+    echo "Доступные ноды:"
+    echo "$NODES_LIST" | awk -F'|' '{printf "  %s) %s  [%s]  %s\n", $1, $3, $5, $4}'
+    echo ""
+    read -rp "Выбери номер ноды: " NODE_PICK
+    PICKED_LINE=$(echo "$NODES_LIST" | awk -F'|' -v n="$NODE_PICK" '$1==n')
+    [[ -n "$PICKED_LINE" ]] || die "Некорректный выбор"
+    RW_EXISTING_NODE_UUID=$(echo "$PICKED_LINE" | cut -d'|' -f2)
+    log "Выбрана нода: $(echo "$PICKED_LINE" | cut -d'|' -f3) ($RW_EXISTING_NODE_UUID)"
+    echo ""
+
+    echo "Что установить на эту ноду?"
+    echo "  1) Установить 4 базовых инбаунда (Reality+TCP, Reality+gRPC, Reality+XHTTP, Hysteria2)"
+    echo "  2) Настроить связку с CDN (TLS+XHTTP через CDN, обход белых списков)"
+    echo "  3) Всё сразу — варианты 1 и 2 вместе"
+    read -rp "Введите номер [1-3]: " NODE_SETUP_CHOICE
+    [[ "$NODE_SETUP_CHOICE" =~ ^[1-3]$ ]] || die "Некорректный выбор"
+    # remap onto the same internal numbering the rest of this function expects (2/3/4)
+    case "$NODE_SETUP_CHOICE" in
+      1) NODE_SETUP_CHOICE=2 ;;
+      2) NODE_SETUP_CHOICE=3 ;;
+      3) NODE_SETUP_CHOICE=4 ;;
+    esac
+    echo ""
+  else
+    echo "Что делаем с этой нодой?"
+    echo "  1) Просто подключить ноду (SECRET_KEY уже есть на руках)"
+    echo "  2) Установить 4 базовых инбаунда (Reality+TCP, Reality+gRPC, Reality+XHTTP, Hysteria2)"
+    echo "  3) Настроить связку с CDN (TLS+XHTTP через CDN, обход белых списков)"
+    echo "  4) Всё сразу — варианты 2 и 3 вместе"
+    read -rp "Введите номер [1-4]: " NODE_SETUP_CHOICE
+    [[ "$NODE_SETUP_CHOICE" =~ ^[1-4]$ ]] || die "Некорректный выбор"
+    echo ""
+  fi
+
+  if [[ "${EXISTING_NODE:-false}" != true ]]; then
+    read -rp "IP панели, для ограничения доступа к ноде (Enter — пропустить, менее безопасно): " PANEL_IP
+    read -rp "NODE_PORT [3000]: " NODE_PORT; NODE_PORT=${NODE_PORT:-3000}
+    read -rp "XTLS_API_PORT [61000]: " XTLS_API_PORT; XTLS_API_PORT=${XTLS_API_PORT:-61000}
+    read -rp "Порт SSH, который нельзя закрывать [22]: " SSH_PORT; SSH_PORT=${SSH_PORT:-22}
+    echo ""
+
+    echo "Блокировать входящий ICMP (ping) на этой ноде?"
+    echo "  1) Да (рекомендуется — обычные клиентские IP не отвечают на пинг)"
+    echo "  2) Нет"
+    read -rp "Введите номер [1-2]: " ICMP_CHOICE
+    BLOCK_ICMP=false; [[ "$ICMP_CHOICE" == "1" ]] && BLOCK_ICMP=true
+    echo ""
+  fi
 
   ENABLE_REALITY_TCP=false; ENABLE_REALITY_GRPC=false; ENABLE_REALITY_XHTTP=false; ENABLE_HY2=false; ENABLE_CDN_XHTTP=false
   AUTO_PROVISION=false
@@ -818,7 +922,7 @@ install_node() {
   esac
   [[ "$NODE_SETUP_CHOICE" != "1" ]] && { AUTO_PROVISION=true; SECRET_SOURCE="2"; }
 
-  if [[ "$SECRET_SOURCE" == "1" ]]; then
+  if [[ "$SECRET_SOURCE" == "1" && "${EXISTING_NODE:-false}" != true ]]; then
     read -rp "SECRET_KEY из панели (Ноды -> эта нода -> Важная информация): " SECRET_KEY
     [[ -n "$SECRET_KEY" ]] || die "SECRET_KEY обязателен"
   fi
@@ -842,16 +946,34 @@ install_node() {
     HY2_PORT=8444
   fi
   if [[ "$ENABLE_CDN_XHTTP" == true ]]; then
+    echo "Для CDN-инбаунда нужны две вещи, которые скрипт сам не сделает:"
+    echo "  1) A-запись домена-origin на IP этого сервера (не требует доступа к серверу,"
+    echo "     только к панели DNS у регистратора) — если уже сделал, просто продолжай"
+    echo "  2) CDN-ресурс в консоли провайдера (Yandex Cloud CDN или другой), созданный"
+    echo "     ПОСЛЕ этого шага — сертификат origin будет готов только к концу скрипта,"
+    echo "     так что создавать ресурс раньше смысла нет, к этому вернёмся в конце"
+    echo ""
     read -rp "Домен origin для этой ноды (dest/CDN-источник, например origin1.example.com): " NODE_ORIGIN_DOMAIN
     [[ -n "$NODE_ORIGIN_DOMAIN" ]] || die "Домен обязателен для CDN-инбаунда"
     read -rp "Публичный домен CDN-ресурса (например cdn.example.com): " CDN_PUBLIC_DOMAIN
     [[ -n "$CDN_PUBLIC_DOMAIN" ]] || die "Публичный CDN-домен обязателен"
-    CDN_XHTTP_LOCAL_PORT=20000
+    if [[ "${EXISTING_NODE:-false}" == true ]]; then
+      # No Nginx in front — Xray's own port IS the public one CDN connects to.
+      # Not 443: that's already the Reality+TCP default and would collide if both
+      # are enabled together. Yandex CDN lets you specify a custom origin port —
+      # check "Порт" in the origin settings if 9443 doesn't suit you.
+      CDN_XHTTP_LOCAL_PORT=9443
+    else
+      CDN_XHTTP_LOCAL_PORT=20000
+    fi
     CDN_XHTTP_PATH="/$(openssl rand -hex 8)/"
   fi
   echo ""
 
-  if [[ "$AUTO_PROVISION" == true ]]; then
+  if [[ "$AUTO_PROVISION" == true && "${EXISTING_NODE:-false}" != true ]]; then
+    echo "Нужен API-токен панели — если ещё не создавал, зайди в панель:"
+    echo "  Settings -> API Tokens -> Create, скопируй значение, потом вернись сюда."
+    echo ""
     read -rp "URL панели (например https://panel.example.com): " RW_PANEL_URL
     read -rp "API-токен: " RW_API_TOKEN
     read -rp "Публичный IP/адрес ЭТОЙ ноды (то, что панель будет использовать для подключения): " RW_NODE_ADDRESS
@@ -867,7 +989,12 @@ install_node() {
   fi
   echo ""
 
-  install_base
+  if [[ "${EXISTING_NODE:-false}" == true ]]; then
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y -qq curl openssl jq >/dev/null 2>&1
+  else
+    install_base
+  fi
 
   if [[ "$ENABLE_REALITY_TCP" == true ]]; then
     generate_reality_keys
@@ -883,17 +1010,31 @@ install_node() {
   fi
   if [[ "$ENABLE_HY2" == true ]]; then
     generate_hy2_cert
+    if [[ "${EXISTING_NODE:-false}" == true ]]; then
+      # No filesystem access to the node itself — pass PEM content inline instead of a path.
+      HY2_CERT_PEM=$(cat /etc/xray-certs/hy2-cert.crt)
+      HY2_KEY_PEM=$(cat /etc/xray-certs/hy2-key.pem)
+    fi
+  fi
+  if [[ "$ENABLE_CDN_XHTTP" == true && "${EXISTING_NODE:-false}" == true ]]; then
+    # No Nginx/certbot possible without server access — Xray terminates TLS itself.
+    # Self-signed by default; replace /etc/xray-certs/hy2-cert.crt with a real cert
+    # (e.g. exported from Yandex Certificate Manager) before running this if you want one.
+    generate_hy2_cert
+    CDN_XHTTP_CERT_PEM=$(cat /etc/xray-certs/hy2-cert.crt)
+    CDN_XHTTP_KEY_PEM=$(cat /etc/xray-certs/hy2-key.pem)
   fi
 
   if [[ "$AUTO_PROVISION" == true ]]; then
     log "Запускаю автоматический провижининг через API панели..."
     mkdir -p /opt/remnanode
-    apt install -y -qq python3
+    apt-get install -y -qq python3 >/dev/null 2>&1
     write_provision_script
 
     env \
       RW_PANEL_URL="$RW_PANEL_URL" RW_API_TOKEN="$RW_API_TOKEN" \
-      RW_NODE_NAME="node-$(hostname)" RW_NODE_ADDRESS="$RW_NODE_ADDRESS" RW_NODE_PORT="$NODE_PORT" \
+      RW_NODE_NAME="node-$(hostname)" RW_NODE_ADDRESS="${RW_NODE_ADDRESS:-}" RW_NODE_PORT="${NODE_PORT:-3000}" \
+      RW_EXISTING_NODE_UUID="${RW_EXISTING_NODE_UUID:-}" \
       RW_ENABLE_REALITY_TCP="$ENABLE_REALITY_TCP" RW_REALITY_TCP_PORT="${REALITY_TCP_PORT:-}" \
       RW_REALITY_TCP_SNI="${REALITY_TCP_SNI:-}" RW_REALITY_TCP_PRIVATE_KEY="${REALITY_TCP_PRIVATE_KEY:-}" \
       RW_REALITY_TCP_SHORTID="${REALITY_TCP_SHORTID:-}" \
@@ -905,25 +1046,30 @@ install_node() {
       RW_REALITY_XHTTP_PRIVATE_KEY="${REALITY_XHTTP_PRIVATE_KEY:-}" RW_REALITY_XHTTP_SHORTID="${REALITY_XHTTP_SHORTID:-}" \
       RW_ENABLE_CDN_XHTTP="$ENABLE_CDN_XHTTP" RW_CDN_XHTTP_PORT="${CDN_XHTTP_LOCAL_PORT:-}" \
       RW_CDN_XHTTP_PATH="${CDN_XHTTP_PATH:-}" RW_CDN_DOMAIN="${CDN_PUBLIC_DOMAIN:-}" \
+      RW_CDN_XHTTP_CERT_PEM="${CDN_XHTTP_CERT_PEM:-}" RW_CDN_XHTTP_KEY_PEM="${CDN_XHTTP_KEY_PEM:-}" \
       RW_ENABLE_HY2="$ENABLE_HY2" RW_HY2_PORT="${HY2_PORT:-}" \
       RW_HY2_CERT_FILE="/etc/xray-certs/hy2-cert.crt" RW_HY2_KEY_FILE="/etc/xray-certs/hy2-key.pem" \
+      RW_HY2_CERT_PEM="${HY2_CERT_PEM:-}" RW_HY2_KEY_PEM="${HY2_KEY_PEM:-}" \
       python3 /opt/remnanode/remnawave_provision.py || die "Автопровижининг не удался — прочитай ошибку выше"
 
-    echo ""
-    log "Запись ноды создана в панели. Теперь нужен её SECRET_KEY."
-    echo "Зайди в панель -> Ноды -> найди только что созданную ноду -> Важная информация -> скопируй ключ."
-    read -rp "Вставь SECRET_KEY сюда: " SECRET_KEY
-    [[ -n "$SECRET_KEY" ]] || die "SECRET_KEY обязателен для запуска контейнера ноды"
+    if [[ "${EXISTING_NODE:-false}" != true ]]; then
+      echo ""
+      log "Запись ноды создана в панели. Теперь нужен её SECRET_KEY."
+      echo "Зайди в панель -> Ноды -> найди только что созданную ноду -> Важная информация -> скопируй ключ."
+      read -rp "Вставь SECRET_KEY сюда: " SECRET_KEY
+      [[ -n "$SECRET_KEY" ]] || die "SECRET_KEY обязателен для запуска контейнера ноды"
+    fi
   fi
 
-  mkdir -p /opt/remnanode
-  cd /opt/remnanode
-  cat > .env <<EOF
+  if [[ "${EXISTING_NODE:-false}" != true ]]; then
+    mkdir -p /opt/remnanode
+    cd /opt/remnanode
+    cat > .env <<EOF
 SECRET_KEY=$SECRET_KEY
 NODE_PORT=$NODE_PORT
 XTLS_API_PORT=$XTLS_API_PORT
 EOF
-  cat > docker-compose.yml <<'EOF'
+    cat > docker-compose.yml <<'EOF'
 services:
   remnanode:
     container_name: remnanode
@@ -934,25 +1080,30 @@ services:
       - .env
     network_mode: host
 EOF
-  log "Запускаю контейнер ноды..."
-  docker compose up -d
+    log "Запускаю контейнер ноды..."
+    docker compose up -d
 
-  # Панель сама инициирует соединение К ноде на NODE_PORT/XTLS_API_PORT — это не мы к ней стучимся.
-  EXTRA_INPUT_RULES="        tcp dport { $NODE_PORT, $XTLS_API_PORT } "
-  if [[ -n "$PANEL_IP" ]]; then
-    EXTRA_INPUT_RULES+="ip saddr $PANEL_IP accept"
+    # Панель сама инициирует соединение К ноде на NODE_PORT/XTLS_API_PORT — это не мы к ней стучимся.
+    EXTRA_INPUT_RULES="        tcp dport { $NODE_PORT, $XTLS_API_PORT } "
+    if [[ -n "$PANEL_IP" ]]; then
+      EXTRA_INPUT_RULES+="ip saddr $PANEL_IP accept"
+    else
+      EXTRA_INPUT_RULES+="accept"
+      warn "NODE_PORT/XTLS_API_PORT открыты для любого источника — в следующий раз укажи IP панели"
+    fi
   else
-    EXTRA_INPUT_RULES+="accept"
-    warn "NODE_PORT/XTLS_API_PORT открыты для любого источника — в следующий раз укажи IP панели"
+    EXTRA_INPUT_RULES=""
   fi
 
   [[ "$ENABLE_REALITY_TCP" == true ]] && EXTRA_INPUT_RULES+=$'\n'"        tcp dport $REALITY_TCP_PORT accept"
   [[ "$ENABLE_REALITY_GRPC" == true ]] && EXTRA_INPUT_RULES+=$'\n'"        tcp dport $REALITY_GRPC_PORT accept"
   [[ "$ENABLE_REALITY_XHTTP" == true ]] && EXTRA_INPUT_RULES+=$'\n'"        tcp dport $REALITY_XHTTP_PORT accept"
   [[ "$ENABLE_HY2" == true ]] && EXTRA_INPUT_RULES+=$'\n'"        udp dport $HY2_PORT accept"
+  [[ "$ENABLE_CDN_XHTTP" == true && "${EXISTING_NODE:-false}" == true ]] && EXTRA_INPUT_RULES+=$'\n'"        tcp dport $CDN_XHTTP_LOCAL_PORT accept"
 
-  if [[ "$ENABLE_CDN_XHTTP" == true ]]; then
+  if [[ "$ENABLE_CDN_XHTTP" == true && "${EXISTING_NODE:-false}" != true ]]; then
     apt install -y -qq nginx certbot
+    write_nginx_hardening
     issue_cert_for_domain "$NODE_ORIGIN_DOMAIN"
     write_decoy_site
 
@@ -966,7 +1117,7 @@ server {
     listen 443 ssl; http2 on; server_name $NODE_ORIGIN_DOMAIN;
     ssl_certificate     /etc/letsencrypt/live/$NODE_ORIGIN_DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$NODE_ORIGIN_DOMAIN/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
+    include /etc/nginx/snippets/ssl-params.conf;
 
     location = /health {
         default_type application/json;
@@ -1007,7 +1158,14 @@ EOF
     EXTRA_INPUT_RULES+=$'\n'"        tcp dport { 80, 443 } accept"
   fi
 
-  write_nftables_base
+  if [[ "${EXISTING_NODE:-false}" == true ]]; then
+    echo ""
+    warn "Firewall на этой ноде не трогаю автоматически — не знаю, что уже настроено хостером."
+    echo "Открой на ней (любым способом, каким управляется её firewall) следующие порты:"
+    echo "$EXTRA_INPUT_RULES" | grep -v '^$'
+  else
+    write_nftables_base
+  fi
 
   if [[ "${INBOUNDS_CHOICE:-}" == "1" ]]; then
     try_fetch_inbound_templates || true
@@ -1015,12 +1173,17 @@ EOF
 
   echo ""
   echo "==================================================="
-  log "Нода установлена и запущена."
+  log "Готово."
   echo "==================================================="
-  echo "NODE_PORT: $NODE_PORT   XTLS_API_PORT: $XTLS_API_PORT"
-  echo ""
-  echo "Проверь страницу Нод в панели — эта нода должна появиться"
-  echo "подключённой в течение нескольких секунд. Если нет: docker logs remnanode"
+  if [[ "${EXISTING_NODE:-false}" != true ]]; then
+    echo "NODE_PORT: $NODE_PORT   XTLS_API_PORT: $XTLS_API_PORT"
+    echo ""
+    echo "Проверь страницу Нод в панели — эта нода должна появиться"
+    echo "подключённой в течение нескольких секунд. Если нет: docker logs remnanode"
+  else
+    echo "Инбаунды применены к существующей ноде ($RW_EXISTING_NODE_UUID)."
+    echo "Проверь страницу Нод в панели — новые инбаунды должны появиться сразу."
+  fi
   echo ""
   if [[ "$ENABLE_REALITY_TCP" == true ]]; then
     echo "--- Reality+TCP ---"
@@ -1042,6 +1205,15 @@ EOF
     echo "--- TLS+XHTTP через CDN ---"
     echo "  https://$CDN_PUBLIC_DOMAIN$CDN_XHTTP_PATH (origin: https://$NODE_ORIGIN_DOMAIN$CDN_XHTTP_PATH)"
     echo "  Host в панели создан автоматически (см. вывод провижининга выше)."
+    if [[ "${EXISTING_NODE:-false}" == true ]]; then
+      echo "  В консоли CDN-провайдера для этого ресурса укажи:"
+      echo "    Протокол для источников: HTTPS"
+      echo "    Порт источника: $CDN_XHTTP_LOCAL_PORT (не 443 по умолчанию — свободен на этой ноде)"
+      echo "  Сертификат на origin — самоподписанный (сгенерирован этим скриптом)."
+      echo "  Если CDN откажется его принимать — замени /etc/xray-certs/hy2-cert.crt"
+      echo "  и /etc/xray-certs/hy2-key.pem на настоящий (например, из Yandex Certificate"
+      echo "  Manager) до запуска этого шага, либо перезапусти провижининг заново."
+    fi
   fi
   echo "==================================================="
 }
