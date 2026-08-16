@@ -1,7 +1,6 @@
 # remnawave-installer
 
 Интерактивный установщик Remnawave (панель + нода) — Nginx + nftables.
-by qellyka
 
 ## Запуск
 
