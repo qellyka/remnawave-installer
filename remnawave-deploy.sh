@@ -676,7 +676,13 @@ write_bootstrap_script() {
 """
 Remnawave panel bootstrap — by qellyka
 Registers the first admin account (only works if no admin exists yet) and
-creates a long-lived API token, printing it on the last line of stdout.
+creates a long-lived API token.
+
+IMPORTANT: ADMIN_USERNAME is printed to stdout immediately after registration
+succeeds — before attempting token creation — so the credentials are never
+lost even if the token-creation step fails afterward (registration already
+created a real account in the database at that point; losing the printed
+password would mean no way to recover it short of the panel's Rescue CLI).
 """
 import json
 import os
@@ -723,10 +729,31 @@ if not status["response"]["isRegisterAllowed"]:
 reg = call("POST", "/api/auth/register", body={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD})
 access_token = reg["response"]["accessToken"]
 
-token_resp = call("POST", "/api/tokens", token=access_token, body={})
-api_token = token_resp["response"]["token"]
-
+# Registration succeeded — a real account now exists in the database. Print
+# this NOW, unconditionally, regardless of what happens with token creation
+# below, so the credentials are never lost.
 print(f"ADMIN_USERNAME={ADMIN_USERNAME}")
+sys.stdout.flush()
+
+# Token creation immediately after registration occasionally hits a brief
+# permission-propagation race on a freshly-created account — retry a few
+# times before giving up.
+api_token = None
+last_error = None
+for attempt in range(5):
+    try:
+        token_resp = call("POST", "/api/tokens", token=access_token, body={})
+        api_token = token_resp["response"]["token"]
+        break
+    except urllib.error.HTTPError as e:
+        last_error = e
+        time.sleep(2)
+
+if api_token is None:
+    print(f"[ERROR] Admin account created, but token creation failed after retries: {last_error}", file=sys.stderr)
+    print("[ERROR] Log in with the printed username/password and create a token manually (Settings -> API Tokens).", file=sys.stderr)
+    sys.exit(3)
+
 print(f"API_TOKEN={api_token}")
 PYEOF
 }
@@ -847,6 +874,7 @@ EOF
   echo "  2) Нет — сделаю сам в UI позже (страницу подписки придётся донастроить вручную)"
   read -rp "Введите номер [1-2]: " BOOTSTRAP_CHOICE
   BOOTSTRAP_OK=false
+  ADMIN_CREATED=false
   if [[ "$BOOTSTRAP_CHOICE" == "1" ]]; then
     read -rp "Логин администратора: " RW_ADMIN_USERNAME
     RW_ADMIN_PASSWORD=$(openssl rand -base64 18)
@@ -854,11 +882,17 @@ EOF
     write_bootstrap_script
     BOOTSTRAP_OUT=$(RW_PANEL_URL="https://$PANEL_DOMAIN" RW_ADMIN_USERNAME="$RW_ADMIN_USERNAME" RW_ADMIN_PASSWORD="$RW_ADMIN_PASSWORD" \
       python3 /opt/remnawave/remnawave_bootstrap.py 2>&1) && BOOTSTRAP_OK=true
-    if [[ "$BOOTSTRAP_OK" == true ]]; then
-      API_TOKEN_VALUE=$(echo "$BOOTSTRAP_OUT" | grep "^API_TOKEN=" | cut -d= -f2-)
+    # Регистрация могла пройти успешно даже если следующий шаг (создание
+    # токена) упал — в этом случае пароль всё равно нужно сохранить и
+    # показать, иначе он потеряется безвозвратно (аккаунт-то уже создан).
+    echo "$BOOTSTRAP_OUT" | grep -q "^ADMIN_USERNAME=" && ADMIN_CREATED=true
+    if [[ "$ADMIN_CREATED" == true ]]; then
       echo "$BOOTSTRAP_OUT" > /opt/remnawave/bootstrap-credentials.txt
       echo "ADMIN_PASSWORD=$RW_ADMIN_PASSWORD" >> /opt/remnawave/bootstrap-credentials.txt
       chmod 600 /opt/remnawave/bootstrap-credentials.txt
+    fi
+    if [[ "$BOOTSTRAP_OK" == true ]]; then
+      API_TOKEN_VALUE=$(echo "$BOOTSTRAP_OUT" | grep "^API_TOKEN=" | cut -d= -f2-)
     else
       warn "Автобутстрап не удался (см. вывод ниже) — создай администратора и токен вручную через UI."
       echo "$BOOTSTRAP_OUT"
@@ -920,6 +954,14 @@ EOF
     echo ""
     echo "Можешь сразу запускать этот же скрипт в режиме ноды и вставить"
     echo "этот URL панели + этот API-токен при автопровижининге."
+  elif [[ "$ADMIN_CREATED" == true ]]; then
+    echo ""
+    warn "Администратор создан, но создать API-токен не удалось (см. ошибку выше)."
+    echo "  Логин:  $RW_ADMIN_USERNAME"
+    echo "  Пароль: $RW_ADMIN_PASSWORD"
+    echo "(сохранено в /opt/remnawave/bootstrap-credentials.txt, chmod 600)"
+    echo "Зайди в панель с этим логином/паролем и создай токен вручную:"
+    echo "  Settings -> API Tokens -> Create"
   else
     echo ""
     echo "Дальше: зайди в панель, создай админа, потом"
