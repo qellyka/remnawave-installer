@@ -15,6 +15,26 @@ log()  { echo -e "\033[1;32m[INFO]\033[0m $1"; }
 warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
 die()  { echo -e "\033[1;31m[ERROR]\033[0m $1"; exit 1; }
 
+# Reads a domain name and validates it, re-prompting on anything that doesn't
+# look like a clean hostname. Strips to only valid domain characters first —
+# this silently drops stray bytes from terminal/paste corruption (garbled
+# copy-paste, keyboard-layout artifacts, etc.) rather than letting them
+# propagate into DNS lookups, certbot, and Nginx configs downstream, where
+# they show up as confusing failures far from the actual cause.
+read_domain() {
+  local prompt="$1" __resultvar="$2" value
+  while true; do
+    read -rp "$prompt" value
+    value=$(printf '%s' "$value" | tr -cd 'a-zA-Z0-9.-')
+    if [[ "$value" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$ ]]; then
+      printf -v "$__resultvar" '%s' "$value"
+      return 0
+    fi
+    warn "Похоже на некорректный домен — возможно, при вводе/вставке приклеился"
+    warn "случайный символ (например от переключения раскладки). Введи ещё раз."
+  done
+}
+
 # Placeholder — will point to a real repo of pre-built inbound templates
 # once we build it together. Kept as a variable so it's a one-line change later.
 INBOUNDS_REPO_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/remnawave-inbounds"
@@ -722,8 +742,8 @@ install_panel() {
   echo "в панели DNS у регистратора прямо сейчас (займёт минуту), потом возвращайся."
   echo "Скрипт сам проверит, резолвятся ли они правильно, перед выпуском сертификатов."
   echo ""
-  read -rp "Домен для панели администратора (например panel.example.com): " PANEL_DOMAIN
-  read -rp "Домен для страницы подписки (например sub.example.com): " SUB_DOMAIN
+  read_domain "Домен для панели администратора (например panel.example.com): " PANEL_DOMAIN
+  read_domain "Домен для страницы подписки (например sub.example.com): " SUB_DOMAIN
   read -rp "Порт SSH, который нельзя закрывать [22]: " SSH_PORT
   SSH_PORT=${SSH_PORT:-22}
   [[ -n "$PANEL_DOMAIN" && -n "$SUB_DOMAIN" ]] || die "Оба домена обязательны"
@@ -1025,10 +1045,8 @@ install_node() {
     echo "     ПОСЛЕ этого шага — сертификат origin будет готов только к концу скрипта,"
     echo "     так что создавать ресурс раньше смысла нет, к этому вернёмся в конце"
     echo ""
-    read -rp "Домен origin для этой ноды (dest/CDN-источник, например origin1.example.com): " NODE_ORIGIN_DOMAIN
-    [[ -n "$NODE_ORIGIN_DOMAIN" ]] || die "Домен обязателен для CDN-инбаунда"
-    read -rp "Публичный домен CDN-ресурса (например cdn.example.com): " CDN_PUBLIC_DOMAIN
-    [[ -n "$CDN_PUBLIC_DOMAIN" ]] || die "Публичный CDN-домен обязателен"
+    read_domain "Домен origin для этой ноды (dest/CDN-источник, например origin1.example.com): " NODE_ORIGIN_DOMAIN
+    read_domain "Публичный домен CDN-ресурса (например cdn.example.com): " CDN_PUBLIC_DOMAIN
     if [[ "${EXISTING_NODE:-false}" == true ]]; then
       # No Nginx in front — Xray's own port IS the public one CDN connects to.
       # Not 443: that's already the Reality+TCP default and would collide if both
