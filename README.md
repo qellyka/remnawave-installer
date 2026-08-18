@@ -2,8 +2,6 @@
 
 Interactive installer for [Remnawave](https://github.com/remnawave) (panel + node) — Nginx + nftables, no Docker-based reverse proxy, no UFW.
 
-by qellyka
-
 ## Quick start
 
 ```bash
@@ -19,9 +17,11 @@ Everything from there is interactive — the script asks what it needs, when it 
 ```
 remnawave-deploy.sh       <- the only file you actually run
 README.md
-decoy-cdn/index.html      <- camouflage page served on the CDN-fronted node's root path
-remnawave-inbounds/       <- reserved for pre-built inbound templates (not implemented yet)
+index.html                <- camouflage page served on the CDN-fronted node's root path
 ```
+
+`remnawave-inbounds/` (pre-built inbound templates) isn't created yet — that
+feature isn't implemented in the script either, it's reserved for later.
 
 `remnawave-deploy.sh` is fully self-contained. It embeds three small Python helper
 scripts (API provisioning, admin/token bootstrap, node listing) as heredocs and
