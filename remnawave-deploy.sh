@@ -229,8 +229,9 @@ issue_cert_for_domain() {
     warn "$domain резолвится в $resolved, а не в IP этого сервера ($public_ip). Certbot может не пройти."
   fi
 
-  mkdir -p /var/www/certbot
-  cat > "/etc/nginx/sites-available/$domain.bootstrap" <<EOF
+  if [[ ! -d "/etc/letsencrypt/live/$domain" ]]; then
+    mkdir -p /var/www/certbot
+    cat > "/etc/nginx/sites-available/$domain.bootstrap" <<EOF
 server {
     listen 80;
     server_name $domain;
@@ -238,14 +239,16 @@ server {
     location / { return 404; }
 }
 EOF
-  ln -sf "/etc/nginx/sites-available/$domain.bootstrap" "/etc/nginx/sites-enabled/$domain.bootstrap"
-  nginx -t && systemctl reload nginx
+    ln -sf "/etc/nginx/sites-available/$domain.bootstrap" "/etc/nginx/sites-enabled/$domain.bootstrap"
+    nginx -t && systemctl reload nginx
 
-  if [[ ! -d "/etc/letsencrypt/live/$domain" ]]; then
     certbot certonly --webroot -w /var/www/certbot -d "$domain" --non-interactive --agree-tos \
       -m "admin@$domain" --no-eff-email || warn "Certbot не смог получить сертификат для $domain — поправь DNS и запусти certbot вручную позже"
+
+    rm -f "/etc/nginx/sites-enabled/$domain.bootstrap" "/etc/nginx/sites-available/$domain.bootstrap"
+  else
+    log "Сертификат для $domain уже есть — пропускаю выпуск."
   fi
-  rm -f "/etc/nginx/sites-enabled/$domain.bootstrap" "/etc/nginx/sites-available/$domain.bootstrap"
 }
 
 try_fetch_inbound_templates() {
