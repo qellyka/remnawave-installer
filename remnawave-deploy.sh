@@ -735,20 +735,29 @@ install_panel() {
   mkdir -p /opt/remnawave
   cd /opt/remnawave
 
-  log "Скачиваю официальные шаблоны docker-compose и .env..."
-  curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/remnawave/backend/refs/heads/main/docker-compose-prod.yml
-  curl -fsSL -o .env https://raw.githubusercontent.com/remnawave/backend/refs/heads/main/.env.sample
+  if [[ -f .env && -f docker-compose.yml ]]; then
+    log ".env уже существует — повторный запуск, секреты не трогаю (иначе пароль Postgres"
+    log "разойдётся с уже инициализированной базой, и панель уйдёт в цикл рестартов)."
+    PG_PW=$(grep "^POSTGRES_PASSWORD=" .env | cut -d= -f2-)
+    grep -q "^FRONT_END_DOMAIN=" .env && sed -i "s/^FRONT_END_DOMAIN=.*/FRONT_END_DOMAIN=$PANEL_DOMAIN/" .env
+    grep -q "^SUB_PUBLIC_DOMAIN=" .env && sed -i "s/^SUB_PUBLIC_DOMAIN=.*/SUB_PUBLIC_DOMAIN=$SUB_DOMAIN/" .env
+  else
+    log "Скачиваю официальные шаблоны docker-compose и .env..."
+    curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/remnawave/backend/refs/heads/main/docker-compose-prod.yml
+    curl -fsSL -o .env https://raw.githubusercontent.com/remnawave/backend/refs/heads/main/.env.sample
 
-  log "Генерирую секреты..."
-  sed -i "s/^JWT_AUTH_SECRET=.*/JWT_AUTH_SECRET=$(openssl rand -hex 64)/" .env
-  sed -i "s/^JWT_API_TOKENS_SECRET=.*/JWT_API_TOKENS_SECRET=$(openssl rand -hex 64)/" .env
-  sed -i "s/^METRICS_PASS=.*/METRICS_PASS=$(openssl rand -hex 64)/" .env
-  sed -i "s/^WEBHOOK_SECRET_HEADER=.*/WEBHOOK_SECRET_HEADER=$(openssl rand -hex 64)/" .env
-  PG_PW=$(openssl rand -hex 24)
-  sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$PG_PW/" .env
-  sed -i "s|^\(DATABASE_URL=\"postgresql://postgres:\)[^@]*\(@.*\)|\1$PG_PW\2|" .env
-  grep -q "^FRONT_END_DOMAIN=" .env && sed -i "s/^FRONT_END_DOMAIN=.*/FRONT_END_DOMAIN=$PANEL_DOMAIN/" .env
-  grep -q "^SUB_PUBLIC_DOMAIN=" .env && sed -i "s/^SUB_PUBLIC_DOMAIN=.*/SUB_PUBLIC_DOMAIN=$SUB_DOMAIN/" .env
+    log "Генерирую секреты..."
+    sed -i "s/^APP_SECRET=.*/APP_SECRET=$(openssl rand -hex 64)/" .env
+    sed -i "s/^JWT_AUTH_SECRET=.*/JWT_AUTH_SECRET=$(openssl rand -hex 64)/" .env
+    sed -i "s/^JWT_API_TOKENS_SECRET=.*/JWT_API_TOKENS_SECRET=$(openssl rand -hex 64)/" .env
+    sed -i "s/^METRICS_PASS=.*/METRICS_PASS=$(openssl rand -hex 64)/" .env
+    sed -i "s/^WEBHOOK_SECRET_HEADER=.*/WEBHOOK_SECRET_HEADER=$(openssl rand -hex 64)/" .env
+    PG_PW=$(openssl rand -hex 24)
+    sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$PG_PW/" .env
+    sed -i "s|^\(DATABASE_URL=\"postgresql://postgres:\)[^@]*\(@.*\)|\1$PG_PW\2|" .env
+    grep -q "^FRONT_END_DOMAIN=" .env && sed -i "s/^FRONT_END_DOMAIN=.*/FRONT_END_DOMAIN=$PANEL_DOMAIN/" .env
+    grep -q "^SUB_PUBLIC_DOMAIN=" .env && sed -i "s/^SUB_PUBLIC_DOMAIN=.*/SUB_PUBLIC_DOMAIN=$SUB_DOMAIN/" .env
+  fi
 
   log "Запускаю контейнеры панели..."
   docker compose up -d
@@ -867,7 +876,7 @@ EOF
   if [[ "$BOOTSTRAP_OK" != true ]]; then
     warn "REMNAWAVE_API_TOKEN оставлен пустым в /opt/remnawave/subscription/.env"
     warn "Создай токен вручную (Settings -> API Tokens), впиши его туда, затем:"
-    warn "  cd /opt/remnawave/subscription && docker compose restart"
+    warn "  cd /opt/remnawave/subscription && docker compose up -d"
   fi
   cd /opt/remnawave/subscription
   docker compose up -d
