@@ -18,7 +18,7 @@ die()  { echo -e "\033[1;31m[ERROR]\033[0m $1"; exit 1; }
 # Placeholder — will point to a real repo of pre-built inbound templates
 # once we build it together. Kept as a variable so it's a one-line change later.
 INBOUNDS_REPO_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/remnawave-inbounds"
-DECOY_SITE_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/decoy-cdn/index.html"
+DECOY_SITE_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/index.html"
 
 #################################
 # BANNER
@@ -352,8 +352,11 @@ NODE_NAME = os.environ.get("RW_NODE_NAME", "node-1")
 NODE_ADDRESS = os.environ.get("RW_NODE_ADDRESS", "")
 NODE_PORT = int(os.environ.get("RW_NODE_PORT", "3000"))
 
-if not all([PANEL_URL, API_TOKEN, NODE_ADDRESS]):
-    die("Missing required env vars: RW_PANEL_URL, RW_API_TOKEN, RW_NODE_ADDRESS")
+EXISTING_NODE_UUID_CHECK = os.environ.get("RW_EXISTING_NODE_UUID", "").strip()
+if not all([PANEL_URL, API_TOKEN]):
+    die("Missing required env vars: RW_PANEL_URL, RW_API_TOKEN")
+if not EXISTING_NODE_UUID_CHECK and not NODE_ADDRESS:
+    die("Missing RW_NODE_ADDRESS (required when creating a new node; not needed when RW_EXISTING_NODE_UUID is set)")
 
 inbounds = []
 
@@ -437,16 +440,39 @@ if env_bool("RW_ENABLE_REALITY_XHTTP"):
 cdn_xhttp_tag = None
 if env_bool("RW_ENABLE_CDN_XHTTP"):
     cdn_xhttp_tag = "cdn-xhttp"
+    cdn_cert_pem = os.environ.get("RW_CDN_XHTTP_CERT_PEM", "")
+    cdn_key_pem = os.environ.get("RW_CDN_XHTTP_KEY_PEM", "")
+    if cdn_cert_pem and cdn_key_pem:
+        # No filesystem access / no local Nginx on the node — Xray terminates TLS
+        # itself, with the cert embedded inline. The Yandex CDN resource's "Origin
+        # protocol" must be set to HTTPS to match (not the Nginx+externalProxy pattern).
+        security_block = {
+            "security": "tls",
+            "tlsSettings": {
+                "certificates": [{
+                    "certificate": cdn_cert_pem.splitlines(),
+                    "key": cdn_key_pem.splitlines()
+                }],
+                "alpn": ["h2", "http/1.1"]
+            }
+        }
+        listen_addr = "0.0.0.0"
+    else:
+        # Server-access case: Nginx terminates real TLS locally, Xray sits behind
+        # it on loopback with security:none (externalProxy in the Host tells the
+        # panel the public-facing connection is TLS).
+        security_block = {"security": "none"}
+        listen_addr = "127.0.0.1"
     inbounds.append({
         "tag": cdn_xhttp_tag,
-        "listen": "127.0.0.1",
+        "listen": listen_addr,
         "port": int(os.environ["RW_CDN_XHTTP_PORT"]),
         "protocol": "vless",
         "settings": {"clients": [], "decryption": "none"},
         "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
         "streamSettings": {
             "network": "xhttp",
-            "security": "none",
+            **security_block,
             "xhttpSettings": {
                 "path": os.environ["RW_CDN_XHTTP_PATH"],
                 "mode": "packet-up",
@@ -475,6 +501,20 @@ if env_bool("RW_ENABLE_CDN_XHTTP"):
 # ---- Hysteria2 ----
 if env_bool("RW_ENABLE_HY2"):
     tag = "hysteria2"
+    hy2_cert_pem = os.environ.get("RW_HY2_CERT_PEM", "")
+    hy2_key_pem = os.environ.get("RW_HY2_KEY_PEM", "")
+    if hy2_cert_pem and hy2_key_pem:
+        # No filesystem access to the node itself — embed the PEM content directly
+        # in the config (one array element per line), instead of referencing a path.
+        cert_block = {
+            "certificate": hy2_cert_pem.splitlines(),
+            "key": hy2_key_pem.splitlines()
+        }
+    else:
+        cert_block = {
+            "certificateFile": os.environ["RW_HY2_CERT_FILE"],
+            "keyFile": os.environ["RW_HY2_KEY_FILE"]
+        }
     inbounds.append({
         "tag": tag,
         "listen": "0.0.0.0",
@@ -487,10 +527,7 @@ if env_bool("RW_ENABLE_HY2"):
             "security": "tls",
             "tlsSettings": {
                 "alpn": ["h3"], "minVersion": "1.3", "maxVersion": "1.3",
-                "certificates": [{
-                    "certificateFile": os.environ["RW_HY2_CERT_FILE"],
-                    "keyFile": os.environ["RW_HY2_KEY_FILE"]
-                }]
+                "certificates": [cert_block]
             },
             "hysteriaSettings": {
                 "version": 2, "udpIdleTimeout": 60,
@@ -524,21 +561,36 @@ print(f"      Profile UUID: {profile_uuid}")
 for t, u in tag_to_uuid.items():
     print(f"      Inbound '{t}' UUID: {u}")
 
-print("[3/4] Creating Node...")
-node_body = {
-    "name": NODE_NAME,
-    "address": NODE_ADDRESS,
-    "port": NODE_PORT,
-    "configProfile": {
-        "activeConfigProfileUuid": profile_uuid,
-        "activeInbounds": list(tag_to_uuid.values())
+print("[3/4] Creating/updating Node...")
+EXISTING_NODE_UUID = os.environ.get("RW_EXISTING_NODE_UUID", "").strip()
+if EXISTING_NODE_UUID:
+    node_body = {
+        "uuid": EXISTING_NODE_UUID,
+        "configProfile": {
+            "activeConfigProfileUuid": profile_uuid,
+            "activeInbounds": list(tag_to_uuid.values())
+        }
     }
-}
-node_resp = api("POST", "/api/nodes", API_TOKEN, node_body)["response"]
-node_uuid = node_resp["uuid"]
-print(f"      Node UUID: {node_uuid}")
-print("      NOTE: SECRET_KEY for this node is not exposed via this API — copy it")
-print("      from the panel UI (Nodes -> this node -> Important information).")
+    node_resp = api("PATCH", "/api/nodes", API_TOKEN, node_body)["response"]
+    node_uuid = node_resp["uuid"]
+    print(f"      Updated EXISTING node: {node_uuid}")
+    print("      (This replaced whatever config profile/inbounds it had before —")
+    print("       if it had other manually-configured inbounds, re-add them via UI.)")
+else:
+    node_body = {
+        "name": NODE_NAME,
+        "address": NODE_ADDRESS,
+        "port": NODE_PORT,
+        "configProfile": {
+            "activeConfigProfileUuid": profile_uuid,
+            "activeInbounds": list(tag_to_uuid.values())
+        }
+    }
+    node_resp = api("POST", "/api/nodes", API_TOKEN, node_body)["response"]
+    node_uuid = node_resp["uuid"]
+    print(f"      Created new Node: {node_uuid}")
+    print("      NOTE: SECRET_KEY for this node is not exposed via this API — copy it")
+    print("      from the panel UI (Nodes -> this node -> Important information).")
 
 host_uuid = None
 if cdn_xhttp_tag:
