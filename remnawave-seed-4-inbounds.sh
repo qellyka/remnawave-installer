@@ -262,7 +262,13 @@ inbounds = [
             "hysteriaSettings": {
                 "version": 2, "udpIdleTimeout": 60,
                 "masquerade": {"type": "proxy", "url": os.environ.get("RW_HY2_MASQUERADE_URL", "https://www.bing.com"), "rewriteHost": True}
-            }
+            },
+            # Hysteria defaults to "brutal" congestion control if this isn't set
+            # explicitly (confirmed in Xray-core's own docs and source) — brutal
+            # needs two-way negotiation that not every client implements well,
+            # which can make the QUIC handshake fail silently, before Xray-core
+            # even logs a connection attempt. BBR doesn't need that negotiation.
+            "finalmask": {"quicParams": {"congestion": "bbr"}}
         }
     },
 ]
