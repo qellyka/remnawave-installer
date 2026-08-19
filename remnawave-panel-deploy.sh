@@ -30,6 +30,19 @@ read_domain() {
   done
 }
 
+# Reads a panel URL and accepts either a bare domain (panel.example.com) or
+# a full URL (https://panel.example.com) — normalizes to always have a
+# scheme, since it's easy to type either form out of habit and Python's
+# urllib rejects a bare hostname outright with a confusing traceback.
+read_panel_url() {
+  local prompt="$1" __resultvar="$2" value
+  read -rp "$prompt" value
+  if [[ ! "$value" =~ ^https?:// ]]; then
+    value="https://$value"
+  fi
+  printf -v "$__resultvar" '%s' "$value"
+}
+
 banner() {
   clear
   echo "==================================================="
@@ -802,13 +815,13 @@ EOF
 }
 
 if [[ "$TOP_MODE" == "seed_only" ]]; then
-  read_domain "URL панели без https:// (например panel.example.com): " SEED_PANEL_HOST
+  read_panel_url "URL панели (например panel.example.com или https://panel.example.com): " SEED_PANEL_URL
   read -rp "API-токен: " SEED_ONLY_TOKEN
   [[ -n "$SEED_ONLY_TOKEN" ]] || die "Токен обязателен"
   apt-get update -qq >/dev/null 2>&1 || true
   apt-get install -y -qq curl openssl jq nftables python3 >/dev/null 2>&1
   mkdir -p /opt/remnawave
-  seed_base_profile "https://$SEED_PANEL_HOST" "$SEED_ONLY_TOKEN"
+  seed_base_profile "$SEED_PANEL_URL" "$SEED_ONLY_TOKEN"
 else
   install_panel
 fi
