@@ -35,11 +35,62 @@ read -rp "API-токен (Settings -> API Tokens в панели): " API_TOKEN
 [[ -n "$API_TOKEN" ]] || die "Токен обязателен"
 
 apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq curl openssl python3 >/dev/null 2>&1
+apt-get install -y -qq curl openssl python3 tar >/dev/null 2>&1
 
 if ! command -v xray >/dev/null 2>&1; then
   log "Устанавливаю Xray-core (только для генерации ключей Reality)..."
   bash -c "$(curl -Ls https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" @ install >/dev/null 2>&1
+fi
+
+# Verifies a small, curated list of SNI-donor candidates with RealiTLScanner
+# (the official XTLS tool for exactly this) instead of trusting one hardcoded
+# domain blindly. Deliberately narrow, not a broad scan: the tool's own docs
+# warn that scanning wide ranges FROM the VPS itself risks getting that VPS's
+# IP flagged — so this only checks a handful of specific, well-known,
+# already-reasonable candidates, picking the first one confirmed reachable
+# and TLS-1.3/H2-capable from THIS server's actual network position. Falls
+# back to the static default below if the scanner can't be fetched/run for
+# any reason — this is a nice-to-have verification, not a hard dependency.
+SNI_CANDIDATES=("www.apple.com" "www.cloudflare.com" "swift.org")
+SNI_DONOR="${SNI_CANDIDATES[0]}"
+
+log "Пробую подтвердить SNI-донора через RealiTLScanner (официальный инструмент XTLS)..."
+SCANNER_BIN=""
+if RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/XTLS/RealiTLScanner/releases/latest 2>/dev/null); then
+  ASSET_URL=$(echo "$RELEASE_JSON" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for a in data.get('assets', []):
+        n = a['name'].lower()
+        if 'linux' in n and ('amd64' in n or 'x86_64' in n):
+            print(a['browser_download_url']); break
+except Exception:
+    pass
+")
+  if [[ -n "$ASSET_URL" ]]; then
+    TMPDIR=$(mktemp -d)
+    if curl -fsSL "$ASSET_URL" -o "$TMPDIR/scanner.tar.gz" 2>/dev/null; then
+      tar -xzf "$TMPDIR/scanner.tar.gz" -C "$TMPDIR" 2>/dev/null || true
+      SCANNER_BIN=$(find "$TMPDIR" -type f -iname "*realitlscanner*" -perm -u+x 2>/dev/null | head -1)
+      [[ -z "$SCANNER_BIN" ]] && SCANNER_BIN=$(find "$TMPDIR" -type f -iname "*realitlscanner*" 2>/dev/null | head -1)
+      [[ -n "$SCANNER_BIN" ]] && chmod +x "$SCANNER_BIN"
+    fi
+  fi
+fi
+
+if [[ -n "$SCANNER_BIN" ]]; then
+  for candidate in "${SNI_CANDIDATES[@]}"; do
+    log "Проверяю $candidate..."
+    RESULT=$(timeout 10 "$SCANNER_BIN" -addr "$candidate" -timeout 5 2>&1 || true)
+    if echo "$RESULT" | grep -q "feasible=true"; then
+      SNI_DONOR="$candidate"
+      log "Подтверждено: $candidate (TLS1.3 + H2, проверено с этого сервера)."
+      break
+    fi
+  done
+else
+  warn "Не удалось получить RealiTLScanner — использую SNI-донора по умолчанию без верификации ($SNI_DONOR)."
 fi
 
 gen_reality_key() {
@@ -242,7 +293,7 @@ print("=====================================================")
 SEEDEOF
 
 env \
-  RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN" \
+  RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN" RW_SNI_DONOR="$SNI_DONOR" \
   RW_TCP_PORT=443 RW_TCP_KEY="$TCP_KEY" RW_TCP_SID="$TCP_SID" \
   RW_GRPC_PORT=8443 RW_GRPC_KEY="$GRPC_KEY" RW_GRPC_SID="$GRPC_SID" RW_GRPC_SERVICE_NAME="$(openssl rand -hex 6)" \
   RW_XHTTP_PORT=2053 RW_XHTTP_KEY="$XHTTP_KEY" RW_XHTTP_SID="$XHTTP_SID" RW_XHTTP_PATH="/$(openssl rand -hex 8)/" \
