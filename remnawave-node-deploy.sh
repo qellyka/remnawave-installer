@@ -29,6 +29,19 @@ read_domain() {
   done
 }
 
+# Reads a panel URL and accepts either a bare domain (panel.example.com) or
+# a full URL (https://panel.example.com) — normalizes to always have a
+# scheme, since it's easy to type either form out of habit and Python's
+# urllib rejects a bare hostname outright with a confusing traceback.
+read_panel_url() {
+  local prompt="$1" __resultvar="$2" value
+  read -rp "$prompt" value
+  if [[ ! "$value" =~ ^https?:// ]]; then
+    value="https://$value"
+  fi
+  printf -v "$__resultvar" '%s' "$value"
+}
+
 # Placeholder — will point to a real repo of pre-built inbound templates
 # once we build it together. Kept as a variable so it's a one-line change later.
 INBOUNDS_REPO_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/remnawave-inbounds"
@@ -802,7 +815,7 @@ PYEOF
 
 install_node_from_existing_profile() {
   if [[ "${EXISTING_NODE:-false}" != true ]]; then
-    read -rp "URL панели (например https://panel.example.com): " RW_PANEL_URL
+    read_panel_url "URL панели (например panel.example.com или https://panel.example.com): " RW_PANEL_URL
     read -rp "API-токен: " RW_API_TOKEN
     read -rp "Публичный IP/адрес ЭТОЙ ноды (то, что панель будет использовать для подключения): " RW_NODE_ADDRESS
     [[ -n "$RW_PANEL_URL" && -n "$RW_API_TOKEN" && -n "$RW_NODE_ADDRESS" ]] || die "Все три поля обязательны"
@@ -926,7 +939,7 @@ install_node() {
     echo "  Settings -> API Tokens -> Create, скопируй значение, потом вернись сюда."
     echo "Если токен уже есть — просто вставь его."
     echo ""
-    read -rp "URL панели (например https://panel.example.com): " RW_PANEL_URL
+    read_panel_url "URL панели (например panel.example.com или https://panel.example.com): " RW_PANEL_URL
     read -rp "API-токен: " RW_API_TOKEN
     [[ -n "$RW_PANEL_URL" && -n "$RW_API_TOKEN" ]] || die "URL панели и API-токен обязательны"
     echo ""
@@ -1066,7 +1079,7 @@ install_node() {
     echo "Нужен API-токен панели — если ещё не создавал, зайди в панель:"
     echo "  Settings -> API Tokens -> Create, скопируй значение, потом вернись сюда."
     echo ""
-    read -rp "URL панели (например https://panel.example.com): " RW_PANEL_URL
+    read_panel_url "URL панели (например panel.example.com или https://panel.example.com): " RW_PANEL_URL
     read -rp "API-токен: " RW_API_TOKEN
     read -rp "Публичный IP/адрес ЭТОЙ ноды (то, что панель будет использовать для подключения): " RW_NODE_ADDRESS
     [[ -n "$RW_PANEL_URL" && -n "$RW_API_TOKEN" && -n "$RW_NODE_ADDRESS" ]] || die "Все три поля обязательны для автопровижининга"
