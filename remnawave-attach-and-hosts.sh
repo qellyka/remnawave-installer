@@ -117,6 +117,8 @@ import os
 import sys
 import urllib.request
 import urllib.error
+import ssl
+import hashlib
 
 
 def die(msg):
@@ -229,16 +231,32 @@ print(f"      reality-xhttp -> Host {host['uuid']}")
 
 # --- Hysteria2 ---
 hy2_raw = raw_by_tag["hysteria2"]
-host = api("POST", "/api/hosts", API_TOKEN, {
+hy2_sni = "www.bing.com"
+host_body = {
     "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["hysteria2"]},
     "remark": "Hysteria2",
     "address": NODE_ADDRESS,
     "port": hy2_raw["port"],
-    "sni": "www.bing.com",
+    "sni": hy2_sni,
     "securityLayer": "DEFAULT"
-})["response"]
-created["hysteria2"] = {"port": hy2_raw["port"], "sni": "www.bing.com", "host_uuid": host["uuid"]}
-print(f"      hysteria2     -> Host {host['uuid']}")
+}
+# The cert is self-signed (no CA chain a client can verify normally) — pin its
+# exact SHA256 fingerprint so clients trust THIS specific cert instead of
+# needing a blanket "insecure" flag. We already have the cert's own PEM lines
+# right here in the profile's raw config, no need to touch the node's disk.
+pinned_fingerprint = None
+try:
+    certs = hy2_raw["streamSettings"]["tlsSettings"]["certificates"]
+    cert_pem = "\n".join(certs[0]["certificate"])
+    der = ssl.PEM_cert_to_DER_cert(cert_pem)
+    pinned_fingerprint = hashlib.sha256(der).hexdigest()
+    host_body["pinnedPeerCertSha256"] = pinned_fingerprint
+except (KeyError, IndexError, ValueError) as e:
+    print(f"      (could not derive pinned cert fingerprint: {e} — client will need allowInsecure instead)")
+
+host = api("POST", "/api/hosts", API_TOKEN, host_body)["response"]
+created["hysteria2"] = {"port": hy2_raw["port"], "sni": hy2_sni, "pinnedPeerCertSha256": pinned_fingerprint, "host_uuid": host["uuid"]}
+print(f"      hysteria2     -> Host {host['uuid']}" + (" (cert pinned)" if pinned_fingerprint else " (NOT pinned)"))
 
 print()
 print("=====================================================")
@@ -246,10 +264,13 @@ print("Done. Node attached, 4 hosts created:")
 for tag, info in created.items():
     print(f"  {tag}: {json.dumps(info)}")
 print()
-print("Hysteria2 uses a self-signed cert — clients need either allowInsecure=1")
-print("or a pinned cert hash (Host.pinnedPeerCertSha256, not set here — this")
-print("script doesn't have access to the actual cert bytes to derive it; add")
-print("it by hand in the panel UI if you want that instead of allowInsecure).")
+if pinned_fingerprint:
+    print("Hysteria2's self-signed cert is pinned by SHA256 — clients should trust")
+    print("it automatically via the generated link, no allowInsecure needed.")
+else:
+    print("Hysteria2 uses a self-signed cert — clients need either allowInsecure=1")
+    print("or a pinned cert hash. Deriving it failed here (see message above);")
+    print("add it by hand in the panel UI, or add allowInsecure client-side.")
 print("PLEASE open the panel UI and visually confirm everything looks correct.")
 print("=====================================================")
 MAINEOF
