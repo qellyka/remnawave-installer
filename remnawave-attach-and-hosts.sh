@@ -225,7 +225,7 @@ server {
     location / { return 301 https://\$host\$request_uri; }
 }
 server {
-    listen 443 ssl; http2 on; server_name $HY2_DOMAIN;
+    listen 443 ssl http2; server_name $HY2_DOMAIN;
     ssl_certificate     /etc/letsencrypt/live/$HY2_DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$HY2_DOMAIN/privkey.pem;
     include /etc/nginx/snippets/ssl-params.conf;
@@ -293,7 +293,7 @@ server {
     return 301 https://\$host\$request_uri;
 }
 server {
-    listen 443 ssl; http2 on; server_name $CDN_ORIGIN_DOMAIN;
+    listen 443 ssl http2; server_name $CDN_ORIGIN_DOMAIN;
     ssl_certificate     /etc/letsencrypt/live/$CDN_ORIGIN_DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$CDN_ORIGIN_DOMAIN/privkey.pem;
     include /etc/nginx/snippets/ssl-params.conf;
@@ -495,8 +495,15 @@ if ENABLE_CDN:
         }
     })
 
+# Config Profile names: max 30 chars, only letters/digits/underscore/dash/space
+# (confirmed from the API's own validation error — no dots, which domains
+# always have, so this can't just be "{name}-{address}" as originally written).
+import re as _re
+_short_node = _re.sub(r"[^A-Za-z0-9_\s-]", "-", NODE_ADDRESS)
+PROFILE_DISPLAY_NAME = f"node-{_short_node}"[:30].rstrip("-")
+
 new_profile_body = {
-    "name": f"{SOURCE_PROFILE_NAME}-{NODE_ADDRESS}",
+    "name": PROFILE_DISPLAY_NAME,
     "config": {
         "inbounds": new_inbounds,
         "outbounds": source_raw_config.get("outbounds", [{"protocol": "freedom", "tag": "direct"}])
