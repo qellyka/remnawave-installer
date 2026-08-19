@@ -17,6 +17,26 @@ log()  { echo -e "\033[1;32m[INFO]\033[0m $1"; }
 warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
 die()  { echo -e "\033[1;31m[ERROR]\033[0m $1"; exit 1; }
 
+# Freshly-provisioned servers very often hold the dpkg/apt lock for the first
+# few minutes (cloud-init, unattended-upgrades, apt-daily.timer running in
+# the background) — a plain `apt-get install` just hangs silently waiting for
+# it, especially with output redirected away, and looks exactly like the
+# script died. Wait for it explicitly instead, with a visible message.
+wait_for_apt_lock() {
+  local waited=0 max_wait=300
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    if [[ $waited -eq 0 ]]; then
+      warn "apt/dpkg занят другим процессом (часто бывает сразу после установки сервера — cloud-init/автообновления). Жду..."
+    fi
+    sleep 5
+    waited=$((waited + 5))
+    if [[ $waited -ge $max_wait ]]; then
+      die "apt/dpkg занят другим процессом больше 5 минут — проверь вручную: ps aux | grep -i apt"
+    fi
+  done
+  [[ $waited -gt 0 ]] && log "Дождался освобождения apt/dpkg (${waited}s)."
+}
+
 DECOY_SITE_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/index.html"
 
 read_panel_url() {
@@ -119,8 +139,10 @@ read_panel_url "URL панели (panel.example.com или https://panel.example
 read -rp "API-токен: " API_TOKEN
 [[ -n "$API_TOKEN" ]] || die "Токен обязателен"
 
-apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq curl python3 openssl dnsutils nginx certbot >/dev/null 2>&1
+wait_for_apt_lock
+apt-get update -qq || true
+wait_for_apt_lock
+apt-get install -y -qq curl python3 openssl dnsutils nginx certbot
 
 cat > /tmp/remnawave_list_nodes.py <<'LISTEOF'
 #!/usr/bin/env python3
@@ -423,8 +445,33 @@ if missing:
 print("[3/5] Building node-specific profile (shared Reality x3 + Hysteria2"
       + (" + CDN)..." if ENABLE_CDN else ")..."))
 
+# Xray inbound tags must be globally unique across the whole panel database
+# (confirmed via a real HTTP 409 — "Inbounds with same tag already exists in
+# database" — not just unique within one profile). Since we're copying
+# inbounds FROM the shared profile (which already owns "reality-tcp" etc.)
+# INTO a brand-new profile, reusing those exact tag strings collides
+# immediately — and would also collide between different nodes' own
+# profiles later. Suffix every tag here with something derived from this
+# node's own address, so it can't collide with anything.
+import copy as _copy
+import re as _re
+_tag_suffix = _re.sub(r"[^A-Za-z0-9_-]", "-", NODE_ADDRESS)[:20].strip("-")
+
+
+def _retagged(inbound, new_tag):
+    ib = _copy.deepcopy(inbound)
+    ib["tag"] = new_tag
+    return ib
+
+
+TCP_TAG = f"reality-tcp-{_tag_suffix}"
+GRPC_TAG = f"reality-grpc-{_tag_suffix}"
+XHTTP_TAG = f"reality-xhttp-{_tag_suffix}"
+HY2_TAG = f"hysteria2-{_tag_suffix}"
+CDN_TAG = f"cdn-xhttp-{_tag_suffix}"
+
 hysteria2_inbound = {
-    "tag": "hysteria2",
+    "tag": HY2_TAG,
     "listen": "0.0.0.0",
     "port": 8444,
     "protocol": "hysteria",
@@ -453,15 +500,15 @@ hysteria2_inbound = {
 }
 
 new_inbounds = [
-    source_raw_by_tag["reality-tcp"],
-    source_raw_by_tag["reality-grpc"],
-    source_raw_by_tag["reality-xhttp"],
+    _retagged(source_raw_by_tag["reality-tcp"], TCP_TAG),
+    _retagged(source_raw_by_tag["reality-grpc"], GRPC_TAG),
+    _retagged(source_raw_by_tag["reality-xhttp"], XHTTP_TAG),
     hysteria2_inbound,
 ]
 
 if ENABLE_CDN:
     new_inbounds.append({
-        "tag": "cdn-xhttp",
+        "tag": CDN_TAG,
         "listen": "127.0.0.1",
         "port": CDN_XHTTP_LOCAL_PORT,
         "protocol": "vless",
@@ -498,7 +545,6 @@ if ENABLE_CDN:
 # Config Profile names: max 30 chars, only letters/digits/underscore/dash/space
 # (confirmed from the API's own validation error — no dots, which domains
 # always have, so this can't just be "{name}-{address}" as originally written).
-import re as _re
 _short_node = _re.sub(r"[^A-Za-z0-9_\s-]", "-", NODE_ADDRESS)
 PROFILE_DISPLAY_NAME = f"node-{_short_node}"[:30].rstrip("-")
 
@@ -516,7 +562,7 @@ raw_by_tag = {ib["tag"]: ib for ib in new_inbounds}
 print(f"      New profile: {PROFILE_UUID}")
 
 print("[4/5] Attaching node to this profile...")
-active_tags = WANTED_SHARED_TAGS + ["hysteria2"] + (["cdn-xhttp"] if ENABLE_CDN else [])
+active_tags = [TCP_TAG, GRPC_TAG, XHTTP_TAG, HY2_TAG] + ([CDN_TAG] if ENABLE_CDN else [])
 node_body = {
     "uuid": NODE_UUID,
     "configProfile": {
@@ -531,10 +577,10 @@ print("[5/5] Creating hosts...")
 created = {}
 
 # --- Reality + TCP ---
-tcp_raw = raw_by_tag["reality-tcp"]
+tcp_raw = raw_by_tag[TCP_TAG]
 tcp_sni = tcp_raw["streamSettings"]["realitySettings"]["serverNames"][0]
 host = api("POST", "/api/hosts", API_TOKEN, {
-    "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["reality-tcp"]},
+    "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid[TCP_TAG]},
     "remark": remark("Reality TCP"),
     "address": NODE_ADDRESS,
     "port": tcp_raw["port"],
@@ -546,11 +592,11 @@ created["reality-tcp"] = {"port": tcp_raw["port"], "sni": tcp_sni, "host_uuid": 
 print(f"      reality-tcp   -> Host {host['uuid']}")
 
 # --- Reality + gRPC ---
-grpc_raw = raw_by_tag["reality-grpc"]
+grpc_raw = raw_by_tag[GRPC_TAG]
 grpc_sni = grpc_raw["streamSettings"]["realitySettings"]["serverNames"][0]
 grpc_service = grpc_raw["streamSettings"]["grpcSettings"]["serviceName"]
 host = api("POST", "/api/hosts", API_TOKEN, {
-    "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["reality-grpc"]},
+    "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid[GRPC_TAG]},
     "remark": remark("Reality gRPC"),
     "address": NODE_ADDRESS,
     "port": grpc_raw["port"],
@@ -564,11 +610,11 @@ created["reality-grpc"] = {"port": grpc_raw["port"], "sni": grpc_sni, "serviceNa
 print(f"      reality-grpc  -> Host {host['uuid']}")
 
 # --- Reality + XHTTP ---
-xhttp_raw = raw_by_tag["reality-xhttp"]
+xhttp_raw = raw_by_tag[XHTTP_TAG]
 xhttp_sni = xhttp_raw["streamSettings"]["realitySettings"]["serverNames"][0]
 xhttp_path = xhttp_raw["streamSettings"]["xhttpSettings"]["path"]
 host = api("POST", "/api/hosts", API_TOKEN, {
-    "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["reality-xhttp"]},
+    "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid[XHTTP_TAG]},
     "remark": remark("Reality XHTTP"),
     "address": NODE_ADDRESS,
     "port": xhttp_raw["port"],
@@ -583,7 +629,7 @@ print(f"      reality-xhttp -> Host {host['uuid']}")
 
 # --- Hysteria2 ---
 host = api("POST", "/api/hosts", API_TOKEN, {
-    "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["hysteria2"]},
+    "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid[HY2_TAG]},
     "remark": remark("Hysteria2"),
     "address": HY2_DOMAIN,
     "port": 8444,
@@ -596,7 +642,7 @@ print(f"      hysteria2     -> Host {host['uuid']}")
 # --- CDN (optional) ---
 if ENABLE_CDN:
     host = api("POST", "/api/hosts", API_TOKEN, {
-        "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["cdn-xhttp"]},
+        "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid[CDN_TAG]},
         "remark": remark(f"CDN — {CDN_PUBLIC_DOMAIN}"),
         "address": CDN_PUBLIC_DOMAIN,
         "port": 443,
