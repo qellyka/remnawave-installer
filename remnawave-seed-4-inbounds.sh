@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Seeds a Remnawave Config Profile with 4 well-established inbound presets
-# (Reality+TCP, Reality+gRPC, Reality+XHTTP, Hysteria2) — by qellyka
+# Seeds a Remnawave Config Profile with 3 well-established, shareable Reality
+# presets (TCP, gRPC, XHTTP) — by qellyka
+#
+# Hysteria2 is deliberately NOT here — it fundamentally needs its own domain
+# and certificate per node (that's how the protocol works, not optional),
+# so it can't be part of a profile meant to be reused across many nodes.
+# It's created separately, per node, by remnawave-attach-and-hosts.sh —
+# along with the Nginx it needs and an optional CDN inbound.
 #
 # Standalone: does NOT install the panel, a node, Nginx, or anything else.
 # Run this on any machine that can reach your panel's API (doesn't have to
 # be the panel server itself) once you already have a running panel and an
 # API token (Settings -> API Tokens in the panel UI).
 #
-# Parameter choices below (SNI donor, gRPC multiMode, XHTTP mode, Hysteria2
-# masquerade) are not invented — each is cross-checked against the current
-# official XTLS/Xray-core docs, the XTLS/Xray-examples repo, and multiple
-# independent 2026 community write-ups. Anything not covered clearly by
-# those sources (advanced XHTTP tuning, Reality's optional min/maxClientVer,
-# etc.) is left out entirely rather than guessed.
+# Parameter choices below (SNI donor, gRPC multiMode, XHTTP mode) are not
+# invented — each is cross-checked against the current official XTLS/Xray-core
+# docs, the XTLS/Xray-examples repo, and multiple independent 2026 community
+# write-ups. Anything not covered clearly by those sources is left out rather
+# than guessed.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -28,7 +33,7 @@ read_panel_url() {
 }
 
 echo "==================================================="
-echo "  Remnawave — seed 4 base inbounds — by qellyka"
+echo "  Remnawave — seed shared inbounds (Reality x3) — by qellyka"
 echo "==================================================="
 read_panel_url "URL панели (panel.example.com или https://panel.example.com): " PANEL_URL
 read -rp "API-токен (Settings -> API Tokens в панели): " API_TOKEN
@@ -104,20 +109,10 @@ TCP_KEY=$(gen_reality_key); TCP_SID=$(openssl rand -hex 8)
 GRPC_KEY=$(gen_reality_key); GRPC_SID=$(openssl rand -hex 8)
 XHTTP_KEY=$(gen_reality_key); XHTTP_SID=$(openssl rand -hex 8)
 
-log "Генерирую самоподписанный сертификат для Hysteria2..."
-mkdir -p /etc/xray-certs
-if [[ ! -f /etc/xray-certs/hy2-cert.crt ]]; then
-  openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-    -keyout /etc/xray-certs/hy2-key.pem -out /etc/xray-certs/hy2-cert.crt \
-    -days 3650 -subj "/CN=www.bing.com" >/dev/null 2>&1
-fi
-HY2_CERT_PEM=$(cat /etc/xray-certs/hy2-cert.crt)
-HY2_KEY_PEM=$(cat /etc/xray-certs/hy2-key.pem)
-
 cat > /tmp/remnawave_seed_profile.py <<'SEEDEOF'
 #!/usr/bin/env python3
 """
-Remnawave — seed a Config Profile with 4 well-established inbound presets — by qellyka
+Remnawave — seed a Config Profile with 3 shared Reality presets — by qellyka
 Creates ONLY a Config Profile — no Node, no Host.
 
 Parameter notes (each cross-checked, none invented):
@@ -137,9 +132,6 @@ Parameter notes (each cross-checked, none invented):
   confirmed by a core contributor in discussion #4113 that "packet-up" is
   specifically the CDN-compatibility mode, not the default recommendation
   for a direct connection.
-- Hysteria2's masquerade (type: proxy, a real external URL, rewriteHost)
-  matches the official Hysteria2 docs' own example verbatim, down to using
-  Bing as the demonstration target.
 - Nothing else is set beyond what's shown as required in XTLS's own
   annotated example configs — optional fields neither documented as
   commonly-needed nor confirmed against a primary source (minClientVer,
@@ -175,7 +167,7 @@ def api(method, path, token, body=None):
 
 PANEL_URL = os.environ["RW_PANEL_URL"]
 API_TOKEN = os.environ["RW_API_TOKEN"]
-PROFILE_NAME = os.environ.get("RW_PROFILE_NAME", "base-4-preset")
+PROFILE_NAME = os.environ.get("RW_PROFILE_NAME", "shared-reality-preset")
 SNI = os.environ.get("RW_SNI_DONOR", "www.apple.com")
 
 inbounds = [
@@ -242,42 +234,13 @@ inbounds = [
             }
         }
     },
-    {
-        "tag": "hysteria2",
-        "listen": "0.0.0.0",
-        "port": int(os.environ["RW_HY2_PORT"]),
-        "protocol": "hysteria",
-        "settings": {"version": 2, "clients": []},
-        "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
-        "streamSettings": {
-            "network": "hysteria",
-            "security": "tls",
-            "tlsSettings": {
-                "alpn": ["h3"], "minVersion": "1.3", "maxVersion": "1.3",
-                "certificates": [{
-                    "certificate": os.environ["RW_HY2_CERT_PEM"].splitlines(),
-                    "key": os.environ["RW_HY2_KEY_PEM"].splitlines()
-                }]
-            },
-            "hysteriaSettings": {
-                "version": 2, "udpIdleTimeout": 60,
-                "masquerade": {"type": "proxy", "url": os.environ.get("RW_HY2_MASQUERADE_URL", "https://www.bing.com"), "rewriteHost": True}
-            },
-            # Hysteria defaults to "brutal" congestion control if this isn't set
-            # explicitly (confirmed in Xray-core's own docs and source) — brutal
-            # needs two-way negotiation that not every client implements well,
-            # which can make the QUIC handshake fail silently, before Xray-core
-            # even logs a connection attempt. BBR doesn't need that negotiation.
-            "finalmask": {"quicParams": {"congestion": "bbr"}}
-        }
-    },
 ]
 
 print("[1/2] Verifying API token...")
 api("GET", "/api/hosts", API_TOKEN)
 print("      OK.")
 
-print("[2/2] Creating Config Profile with 4 base inbounds...")
+print("[2/2] Creating Config Profile with 3 shared Reality inbounds...")
 profile_body = {
     "name": PROFILE_NAME,
     "config": {
@@ -294,7 +257,9 @@ for ib in profile_resp["inbounds"]:
 print()
 print("=====================================================")
 print(f"Done. Profile '{PROFILE_NAME}' created: {profile_uuid}")
-print("Open the panel UI -> Nodes -> pick this profile when creating/editing a node.")
+print("Open remnawave-attach-and-hosts.sh next, on the node itself — it attaches")
+print("this profile, and adds Hysteria2 (its own domain, mandatory) + an")
+print("optional CDN inbound, both node-specific.")
 print("=====================================================")
 SEEDEOF
 
@@ -303,5 +268,4 @@ env \
   RW_TCP_PORT=443 RW_TCP_KEY="$TCP_KEY" RW_TCP_SID="$TCP_SID" \
   RW_GRPC_PORT=8443 RW_GRPC_KEY="$GRPC_KEY" RW_GRPC_SID="$GRPC_SID" RW_GRPC_SERVICE_NAME="$(openssl rand -hex 6)" \
   RW_XHTTP_PORT=2053 RW_XHTTP_KEY="$XHTTP_KEY" RW_XHTTP_SID="$XHTTP_SID" RW_XHTTP_PATH="/$(openssl rand -hex 8)/" \
-  RW_HY2_PORT=8444 RW_HY2_CERT_PEM="$HY2_CERT_PEM" RW_HY2_KEY_PEM="$HY2_KEY_PEM" \
   python3 /tmp/remnawave_seed_profile.py
