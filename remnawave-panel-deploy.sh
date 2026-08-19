@@ -54,6 +54,23 @@ banner() {
 banner
 
 #################################
+# INTERACTIVE: full install or just seed a profile
+#################################
+echo "Что делаем?"
+echo ""
+echo "  1) Установить панель (полная установка)"
+echo "  2) Только создать Config Profile с 4 базовыми инбаундами"
+echo "     (панель уже установлена — своя или через этот же скрипт ранее)"
+echo ""
+read -rp "Введите номер [1-2]: " TOP_CHOICE
+case "$TOP_CHOICE" in
+  1) TOP_MODE="install" ;;
+  2) TOP_MODE="seed_only" ;;
+  *) die "Некорректный выбор" ;;
+esac
+echo ""
+
+#################################
 # COMMON HELPERS
 #################################
 install_base() {
@@ -464,6 +481,39 @@ print("=====================================================")
 SEEDEOF
 }
 
+# Generates fresh keys/cert for the 4 base presets and calls the seed script.
+# Takes panel URL and API token as arguments — works whether called from a
+# full install (URL/token already known) or standalone (asked for directly).
+seed_base_profile() {
+  local panel_url="$1" token="$2"
+  apt install -y -qq python3
+  generate_reality_keys
+  local tcp_priv="$REALITY_PRIVATE_KEY" tcp_sid="$REALITY_SHORTID"
+  generate_reality_keys
+  local grpc_priv="$REALITY_PRIVATE_KEY" grpc_sid="$REALITY_SHORTID"
+  generate_reality_keys
+  local xhttp_priv="$REALITY_PRIVATE_KEY" xhttp_sid="$REALITY_SHORTID"
+  generate_hy2_cert
+  local hy2_cert hy2_key
+  hy2_cert=$(cat /etc/xray-certs/hy2-cert.crt)
+  hy2_key=$(cat /etc/xray-certs/hy2-key.pem)
+  write_seed_profile_script
+
+  env \
+    RW_PANEL_URL="$panel_url" RW_API_TOKEN="$token" \
+    RW_REALITY_TCP_PORT=443 RW_REALITY_TCP_SNI=yandex.ru \
+    RW_REALITY_TCP_PRIVATE_KEY="$tcp_priv" RW_REALITY_TCP_SHORTID="$tcp_sid" \
+    RW_REALITY_GRPC_PORT=8443 RW_REALITY_GRPC_SNI=yandex.ru \
+    RW_REALITY_GRPC_PRIVATE_KEY="$grpc_priv" RW_REALITY_GRPC_SHORTID="$grpc_sid" \
+    RW_REALITY_GRPC_SERVICE_NAME="$(openssl rand -hex 6)" \
+    RW_REALITY_XHTTP_PORT=2053 RW_REALITY_XHTTP_SNI=yandex.ru \
+    RW_REALITY_XHTTP_PRIVATE_KEY="$xhttp_priv" RW_REALITY_XHTTP_SHORTID="$xhttp_sid" \
+    RW_REALITY_XHTTP_PATH="/$(openssl rand -hex 8)/" \
+    RW_HY2_PORT=8444 RW_HY2_CERT_PEM="$hy2_cert" RW_HY2_KEY_PEM="$hy2_key" \
+    python3 /opt/remnawave/remnawave_seed_profile.py \
+    || warn "Не удалось создать профиль."
+}
+
 install_panel() {
   echo "Перед этим шагом нужны две A-записи в DNS, указывающие на IP этого сервера:"
   echo "  - домен для панели (например panel.example.com)"
@@ -674,31 +724,7 @@ EOF
       read -rp "API-токен: " SEED_TOKEN
     fi
     if [[ -n "$SEED_TOKEN" ]]; then
-      apt install -y -qq python3
-      generate_reality_keys
-      SEED_TCP_PRIVATE_KEY="$REALITY_PRIVATE_KEY"; SEED_TCP_SHORTID="$REALITY_SHORTID"
-      generate_reality_keys
-      SEED_GRPC_PRIVATE_KEY="$REALITY_PRIVATE_KEY"; SEED_GRPC_SHORTID="$REALITY_SHORTID"
-      generate_reality_keys
-      SEED_XHTTP_PRIVATE_KEY="$REALITY_PRIVATE_KEY"; SEED_XHTTP_SHORTID="$REALITY_SHORTID"
-      generate_hy2_cert
-      SEED_HY2_CERT_PEM=$(cat /etc/xray-certs/hy2-cert.crt)
-      SEED_HY2_KEY_PEM=$(cat /etc/xray-certs/hy2-key.pem)
-      write_seed_profile_script
-
-      env \
-        RW_PANEL_URL="https://$PANEL_DOMAIN" RW_API_TOKEN="$SEED_TOKEN" \
-        RW_REALITY_TCP_PORT=443 RW_REALITY_TCP_SNI=yandex.ru \
-        RW_REALITY_TCP_PRIVATE_KEY="$SEED_TCP_PRIVATE_KEY" RW_REALITY_TCP_SHORTID="$SEED_TCP_SHORTID" \
-        RW_REALITY_GRPC_PORT=8443 RW_REALITY_GRPC_SNI=yandex.ru \
-        RW_REALITY_GRPC_PRIVATE_KEY="$SEED_GRPC_PRIVATE_KEY" RW_REALITY_GRPC_SHORTID="$SEED_GRPC_SHORTID" \
-        RW_REALITY_GRPC_SERVICE_NAME="$(openssl rand -hex 6)" \
-        RW_REALITY_XHTTP_PORT=2053 RW_REALITY_XHTTP_SNI=yandex.ru \
-        RW_REALITY_XHTTP_PRIVATE_KEY="$SEED_XHTTP_PRIVATE_KEY" RW_REALITY_XHTTP_SHORTID="$SEED_XHTTP_SHORTID" \
-        RW_REALITY_XHTTP_PATH="/$(openssl rand -hex 8)/" \
-        RW_HY2_PORT=8444 RW_HY2_CERT_PEM="$SEED_HY2_CERT_PEM" RW_HY2_KEY_PEM="$SEED_HY2_KEY_PEM" \
-        python3 /opt/remnawave/remnawave_seed_profile.py \
-        || warn "Не удалось создать профиль — можно будет сделать это позже при установке ноды."
+      seed_base_profile "https://$PANEL_DOMAIN" "$SEED_TOKEN"
     else
       warn "Токен не введён — профиль не создан."
     fi
@@ -775,4 +801,14 @@ EOF
   echo "==================================================="
 }
 
-install_panel
+if [[ "$TOP_MODE" == "seed_only" ]]; then
+  read_domain "URL панели без https:// (например panel.example.com): " SEED_PANEL_HOST
+  read -rp "API-токен: " SEED_ONLY_TOKEN
+  [[ -n "$SEED_ONLY_TOKEN" ]] || die "Токен обязателен"
+  apt-get update -qq >/dev/null 2>&1 || true
+  apt-get install -y -qq curl openssl jq nftables python3 >/dev/null 2>&1
+  mkdir -p /opt/remnawave
+  seed_base_profile "https://$SEED_PANEL_HOST" "$SEED_ONLY_TOKEN"
+else
+  install_panel
+fi
