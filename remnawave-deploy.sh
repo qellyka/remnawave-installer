@@ -788,7 +788,8 @@ install_panel() {
   write_nginx_hardening
 
   log "Пишу конфиги Nginx..."
-  cat > /etc/nginx/sites-available/remnawave-panel <<EOF
+  if [[ -d "/etc/letsencrypt/live/$PANEL_DOMAIN" ]]; then
+    cat > /etc/nginx/sites-available/remnawave-panel <<EOF
 server {
     listen 80; server_name $PANEL_DOMAIN;
     return 301 https://\$host\$request_uri;
@@ -808,8 +809,19 @@ server {
     }
 }
 EOF
+  else
+    warn "Сертификата для $PANEL_DOMAIN нет — пишу временный HTTP-конфиг без HTTPS."
+    cat > /etc/nginx/sites-available/remnawave-panel <<EOF
+server {
+    listen 80; server_name $PANEL_DOMAIN;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 503 'Сертификат ещё не выпущен — перезапусти certbot вручную.'; }
+}
+EOF
+  fi
 
-  cat > /etc/nginx/sites-available/remnawave-sub <<EOF
+  if [[ -d "/etc/letsencrypt/live/$SUB_DOMAIN" ]]; then
+    cat > /etc/nginx/sites-available/remnawave-sub <<EOF
 server {
     listen 80; server_name $SUB_DOMAIN;
     return 301 https://\$host\$request_uri;
@@ -833,10 +845,26 @@ server {
     }
 }
 EOF
+  else
+    warn "Сертификата для $SUB_DOMAIN нет — пишу временный HTTP-конфиг без HTTPS."
+    cat > /etc/nginx/sites-available/remnawave-sub <<EOF
+server {
+    listen 80; server_name $SUB_DOMAIN;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 503 'Сертификат ещё не выпущен — перезапусти certbot вручную.'; }
+}
+EOF
+  fi
   ln -sf /etc/nginx/sites-available/remnawave-panel /etc/nginx/sites-enabled/
   ln -sf /etc/nginx/sites-available/remnawave-sub /etc/nginx/sites-enabled/
   rm -f /etc/nginx/sites-enabled/default
   nginx -t && systemctl reload nginx
+  if [[ ! -d "/etc/letsencrypt/live/$PANEL_DOMAIN" || ! -d "/etc/letsencrypt/live/$SUB_DOMAIN" ]]; then
+    warn "Один или оба домена работают пока без HTTPS (см. предупреждения выше)."
+    warn "Когда лимит Let's Encrypt снимется (сообщение certbot указывает точное время),"
+    warn "запусти: certbot certonly --webroot -w /var/www/certbot -d ДОМЕН, затем"
+    warn "перезапусти установку панели ещё раз — она сама допишет нормальный HTTPS-конфиг."
+  fi
 
   EXTRA_INPUT_RULES="        tcp dport { 80, 443 } accept"
   write_nftables_base
