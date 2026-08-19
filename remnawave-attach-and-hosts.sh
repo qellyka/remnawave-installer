@@ -100,6 +100,11 @@ echo "для управления нодой)."
 read -rp "Публичный адрес ноды: " NODE_PUBLIC_ADDRESS
 [[ -n "$NODE_PUBLIC_ADDRESS" ]] || die "Адрес обязателен"
 
+echo ""
+echo "Префикс к названию хостов — необязательно, добавится перед именем каждого"
+echo "хоста через пробел (например флаг страны: 🇵🇱 даст «🇵🇱 Reality TCP»)."
+read -rp "Префикс (Enter — пропустить): " HOST_PREFIX
+
 cat > /tmp/remnawave_attach_and_hosts.py <<'MAINEOF'
 #!/usr/bin/env python3
 """
@@ -147,6 +152,11 @@ API_TOKEN = os.environ["RW_API_TOKEN"]
 NODE_UUID = os.environ["RW_NODE_UUID"]
 PROFILE_UUID = os.environ["RW_PROFILE_UUID"]
 NODE_ADDRESS = os.environ["RW_NODE_PUBLIC_ADDRESS"]
+HOST_PREFIX = os.environ.get("RW_HOST_PREFIX", "").strip()
+
+
+def remark(name):
+    return f"{HOST_PREFIX} {name}" if HOST_PREFIX else name
 
 print("[1/4] Verifying API token...")
 api("GET", "/api/hosts", API_TOKEN)
@@ -183,7 +193,7 @@ tcp_raw = raw_by_tag["reality-tcp"]
 tcp_sni = tcp_raw["streamSettings"]["realitySettings"]["serverNames"][0]
 host = api("POST", "/api/hosts", API_TOKEN, {
     "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["reality-tcp"]},
-    "remark": "Reality TCP",
+    "remark": remark("Reality TCP"),
     "address": NODE_ADDRESS,
     "port": tcp_raw["port"],
     "sni": tcp_sni,
@@ -199,7 +209,7 @@ grpc_sni = grpc_raw["streamSettings"]["realitySettings"]["serverNames"][0]
 grpc_service = grpc_raw["streamSettings"]["grpcSettings"]["serviceName"]
 host = api("POST", "/api/hosts", API_TOKEN, {
     "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["reality-grpc"]},
-    "remark": "Reality gRPC",
+    "remark": remark("Reality gRPC"),
     "address": NODE_ADDRESS,
     "port": grpc_raw["port"],
     "sni": grpc_sni,
@@ -217,7 +227,7 @@ xhttp_sni = xhttp_raw["streamSettings"]["realitySettings"]["serverNames"][0]
 xhttp_path = xhttp_raw["streamSettings"]["xhttpSettings"]["path"]
 host = api("POST", "/api/hosts", API_TOKEN, {
     "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["reality-xhttp"]},
-    "remark": "Reality XHTTP",
+    "remark": remark("Reality XHTTP"),
     "address": NODE_ADDRESS,
     "port": xhttp_raw["port"],
     "sni": xhttp_sni,
@@ -234,7 +244,7 @@ hy2_raw = raw_by_tag["hysteria2"]
 hy2_sni = "www.bing.com"
 host_body = {
     "inbound": {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_to_uuid["hysteria2"]},
-    "remark": "Hysteria2",
+    "remark": remark("Hysteria2"),
     "address": NODE_ADDRESS,
     "port": hy2_raw["port"],
     "sni": hy2_sni,
@@ -277,4 +287,5 @@ MAINEOF
 
 RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN" RW_NODE_UUID="$NODE_UUID" \
   RW_PROFILE_UUID="$PROFILE_UUID" RW_NODE_PUBLIC_ADDRESS="$NODE_PUBLIC_ADDRESS" \
+  RW_HOST_PREFIX="$HOST_PREFIX" \
   python3 /tmp/remnawave_attach_and_hosts.py
