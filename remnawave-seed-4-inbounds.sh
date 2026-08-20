@@ -25,6 +25,27 @@ log()  { echo -e "\033[1;32m[INFO]\033[0m $1"; }
 warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
 die()  { echo -e "\033[1;31m[ERROR]\033[0m $1"; exit 1; }
 
+# Freshly-provisioned servers very often hold the dpkg/apt lock for the first
+# few minutes (cloud-init, unattended-upgrades, apt-daily.timer running in
+# the background) — a plain `apt-get install` just hangs silently waiting for
+# it, especially with output redirected away, and looks exactly like the
+# script died. Wait for it explicitly instead, with a visible message.
+wait_for_apt_lock() {
+  local waited=0 max_wait=300
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    if [[ $waited -eq 0 ]]; then
+      warn "apt/dpkg занят другим процессом (часто бывает сразу после установки сервера — cloud-init/автообновления). Жду..."
+    fi
+    sleep 5
+    waited=$((waited + 5))
+    if [[ $waited -ge $max_wait ]]; then
+      die "apt/dpkg занят другим процессом больше 5 минут — проверь вручную: ps aux | grep -i apt"
+    fi
+  done
+  [[ $waited -gt 0 ]] && log "Дождался освобождения apt/dpkg (${waited}s)."
+  return 0
+}
+
 read_panel_url() {
   local prompt="$1" __resultvar="$2" value
   read -rp "$prompt" value
@@ -39,12 +60,14 @@ read_panel_url "URL панели (panel.example.com или https://panel.example
 read -rp "API-токен (Settings -> API Tokens в панели): " API_TOKEN
 [[ -n "$API_TOKEN" ]] || die "Токен обязателен"
 
-apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq curl openssl python3 tar >/dev/null 2>&1
+wait_for_apt_lock
+apt-get update -qq || true
+wait_for_apt_lock
+apt-get install -y -qq curl openssl python3 tar
 
 if ! command -v xray >/dev/null 2>&1; then
   log "Устанавливаю Xray-core (только для генерации ключей Reality)..."
-  bash -c "$(curl -Ls https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" @ install >/dev/null 2>&1
+  bash -c "$(curl -Ls https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" @ install
 fi
 
 # Verifies a small, curated list of SNI-donor candidates with RealiTLScanner
