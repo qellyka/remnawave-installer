@@ -1,17 +1,1058 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gaford CDN — Overview</title><style>
-*{box-sizing:border-box}body{margin:0;background:#f7f8fa;color:#111827;font:14px Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}.top{height:58px;background:#fff;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;padding:0 22px;gap:24px}.brand{font-size:20px;font-weight:700;width:180px}.cloud{display:inline-block;width:30px;height:18px;position:relative;margin-right:8px;vertical-align:-3px}.cloud:before{content:"";position:absolute;left:3px;top:6px;width:24px;height:10px;background:#f59e0b;border-radius:8px}.cloud:after{content:"";position:absolute;left:9px;top:1px;width:13px;height:13px;background:#fb923c;border-radius:50%}.site,.btn{height:36px;border:1px solid #d7dce3;border-radius:7px;background:#fff;padding:0 12px}.site{min-width:190px;text-align:left}.site span{float:right;color:#6b7280}.grow{flex:1}.top a{color:#111827;text-decoration:none;margin-left:10px}.avatar{width:26px;height:26px;border-radius:50%;background:#d1d5db;text-align:center;line-height:26px}.layout{display:flex;min-height:calc(100vh - 58px)}.side{width:270px;background:#fff;border-right:1px solid #e5e7eb;padding:22px 10px 60px}.back{display:block;padding:10px 14px;color:#111827;text-decoration:none}.title{font-size:12px;color:#6b7280;margin:18px 14px 7px}.nav a{display:flex;gap:10px;align-items:center;padding:9px 13px;border-radius:7px;color:#111827;text-decoration:none}.nav a.active,.nav a:hover{background:#f0f2f5}.ico{width:18px;text-align:center;color:#4b5563}.main{flex:1;padding:30px 28px 70px;max-width:1500px;width:100%;margin:auto}.head{display:flex}.head h1{margin:0;font-size:29px;letter-spacing:-.5px}.sub{color:#6b7280;margin-top:5px;font-size:15px}.badge{font-size:12px;background:#e8f7ed;color:#15803d;padding:4px 9px;border-radius:999px;vertical-align:5px;margin-left:5px}.actions{margin-left:auto;display:flex;gap:10px}.primary{background:#2563eb;color:white;border-color:#2563eb}.banner{margin-top:20px;background:#f7f8ff;border:1px solid #c7d2fe;border-radius:8px;padding:13px 16px;display:flex;align-items:center;gap:13px}.tg{width:36px;height:36px;border-radius:50%;background:#229ed9;color:#fff;display:grid;place-items:center;font-size:18px}.banner strong{color:#173ea5}.banner small{display:block;color:#52607a;margin-top:3px}.bot{margin-left:auto;border:1px solid #aab9f7;background:#fff;border-radius:7px;padding:8px 12px;color:#1d4ed8}.cards{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-top:18px}.card,.panel{background:#fff;border:1px solid #e1e5ea;border-radius:8px}.card{padding:16px;min-height:105px}.label{font-size:13px;color:#374151}.num{font-size:22px;font-weight:650;margin-top:8px}.up{color:#16a34a;font-size:12px}.down{color:#dc2626;font-size:12px}.grid{display:grid;grid-template-columns:minmax(0,2.1fr) minmax(300px,1fr);gap:18px;margin-top:18px}.panel{overflow:hidden}.ph{padding:15px 16px;border-bottom:1px solid #e5e7eb;display:flex;align-items:center}.ph h2{font-size:15px;margin:0}.right{margin-left:auto;color:#2563eb;font-size:13px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 15px;border-bottom:1px solid #edf0f2}th{font-size:12px;color:#4b5563}td{font-size:13px}.online{color:#15803d}.ep{padding:13px 15px;border-bottom:1px solid #edf0f2}.ep:last-child{border:0}.ep b{display:block}.ep small{color:#6b7280}.ok{float:right;color:#15803d;font-size:12px;font-weight:600}.chart{height:245px;padding:15px}.chartarea{height:195px;background:linear-gradient(to bottom,transparent 24%,#eef0f2 25%,transparent 26%,transparent 49%,#eef0f2 50%,transparent 51%,transparent 74%,#eef0f2 75%,transparent 76%)}svg{width:100%;height:100%}.logs{padding:0 15px}.log{padding:11px 0;border-bottom:1px solid #edf0f2;font-size:12px}.tag{background:#e8f7ed;color:#15803d;border-radius:4px;padding:2px 5px;font-size:10px;font-weight:700;margin-right:7px}.lt{color:#6b7280;margin-right:9px}.footer{position:fixed;bottom:0;left:270px;right:0;height:46px;background:#fff;border-top:1px solid #e5e7eb;display:flex;justify-content:center;align-items:center;gap:18px;font-size:12px}.footer a{color:#111827;text-decoration:none}@media(max-width:1100px){.cards{grid-template-columns:repeat(3,1fr)}}@media(max-width:800px){.side{display:none}.footer{left:0}.grid{grid-template-columns:1fr}.cards{grid-template-columns:repeat(2,1fr)}.actions{display:none}}
-</style></head><body>
-<header class="top"><div class="brand"><i class="cloud"></i>GAFORD</div><button class="site">cdn.tkirbis30.ru <span>⌄</span></button><div class="grow"></div><a href="#">＋ Add site</a><a href="#">Support⌄</a><div class="avatar">●</div></header>
-<div class="layout"><aside class="side"><a class="back" href="#">← &nbsp;Back to Bots</a><div class="title">CDN</div><nav class="nav"><a class="active" href="#">▣ Overview</a><a href="#">◷ Analytics</a><a href="#">◉ Edge Network</a><a href="#">≡ Logs</a><a href="#">▣ Cache &nbsp;<small style="background:#e0e7ff;color:#3730a3;padding:2px 6px;border-radius:9px">New</small></a></nav><div class="title">Bot Services</div><nav class="nav"><a href="#">◌ Telegram Webhook</a><a href="#">▧ File Delivery</a><a href="#">◫ Media CDN</a><a href="#">⌘ API Endpoints</a><a href="#">◷ Rate Limiting</a><a href="#">♢ Security</a></nav><div class="title">Settings</div><nav class="nav"><a href="#">⚙ General</a><a href="#">▤ Custom Domains</a><a href="#">▢ SSL / TLS</a><a href="#">⚑ Rules</a><a href="#">◈ Origin Configuration</a></nav></aside>
-<main class="main"><div class="head"><div><h1>Gaford CDN <span class="badge">Active</span></h1><div class="sub">Content Delivery Network for Gaford Telegram Bot</div></div><div class="actions"><button class="btn">CDN Setup: Full</button><button class="btn">▣ Documentation</button></div></div>
-<div class="banner"><div class="tg">➤</div><div><strong>Optimized CDN for Telegram Bot Assets</strong><small>Delivering files, images, and bot responses faster to Telegram users worldwide.</small></div><div class="bot">Bot: @gaford_bot ↗</div></div>
-<section class="cards"><div class="card"><div class="label">Requests (24h)</div><div class="num" id="req">1.48M <span class="up">↑ 18.6%</span></div></div><div class="card"><div class="label">Bandwidth (24h)</div><div class="num" id="bw">82.69 GB <span class="up">↑ 22.4%</span></div></div><div class="card"><div class="label">Cache Hit Ratio</div><div class="num" id="hit">98.73% <span class="up">↑ 1.2%</span></div></div><div class="card"><div class="label">Errors (24h)</div><div class="num" id="err">312 <span class="down">↓ 14.8%</span></div></div><div class="card"><div class="label">Edge Locations</div><div class="num">24</div><div style="color:#15803d;font-size:12px;margin-top:7px">Online</div></div><div class="card"><div class="label">Status</div><div class="num" style="font-size:16px;color:#15803d">✓ Operational</div><div style="color:#6b7280;font-size:12px;margin-top:6px">All Systems Normal</div></div></section>
-<div class="grid"><div><div class="panel"><div class="ph"><h2>Edge Network</h2><span class="right online">● All systems operational</span></div><table><thead><tr><th>Location</th><th>Status</th><th>Latency</th><th>Requests (24h)</th><th>Bandwidth (24h)</th></tr></thead><tbody id="edges"><tr><td>🇳🇱 Amsterdam, NL</td><td class="online">Online</td><td>12 ms</td><td>186.2K</td><td>12.48 GB</td></tr><tr><td>🇩🇪 Frankfurt, DE</td><td class="online">Online</td><td>14 ms</td><td>173.6K</td><td>10.23 GB</td></tr><tr><td>🇵🇱 Warsaw, PL</td><td class="online">Online</td><td>18 ms</td><td>142.7K</td><td>8.91 GB</td></tr><tr><td>🇺🇸 New York, US</td><td class="online">Online</td><td>68 ms</td><td>254.1K</td><td>17.82 GB</td></tr><tr><td>🇺🇸 Dallas, US</td><td class="online">Online</td><td>72 ms</td><td>164.3K</td><td>11.37 GB</td></tr><tr><td>🇸🇬 Singapore, SG</td><td class="online">Online</td><td>136 ms</td><td>98.7K</td><td>6.45 GB</td></tr></tbody></table><div style="padding:12px 15px;color:#2563eb">View all locations (24) →</div></div>
-<div class="panel" style="margin-top:18px"><div class="ph"><h2>CDN Analytics</h2><span class="right"><button class="btn" style="height:30px">24 Hours⌄</button></span></div><div class="chart"><div style="font-size:11px;color:#4b5563">◆ Requests &nbsp;&nbsp; <span style="color:#8b5cf6">◆</span> Bandwidth (GB)</div><div class="chartarea"><svg viewBox="0 0 900 195" preserveAspectRatio="none"><polyline fill="none" stroke="#2563eb" stroke-width="2.2" points="0,140 40,158 80,148 120,162 160,137 200,151 240,125 280,146 320,120 360,124 400,113 440,137 480,118 520,132 560,105 600,125 640,93 680,118 720,98 760,126 800,74 840,88 900,61"/><polyline fill="none" stroke="#8b5cf6" stroke-width="2" points="0,165 40,174 80,157 120,169 160,150 200,159 240,143 280,154 320,137 360,151 400,142 440,157 480,145 520,154 560,130 600,148 640,119 680,141 720,125 760,151 800,111 840,130 900,102"/></svg></div></div></div></div>
-<div><div class="panel"><div class="ph"><h2>Bot Endpoints</h2></div><div class="ep"><span class="ok">Online</span><b>Telegram Webhook</b><small>https://cdn.tkirbis30.ru/webhook</small></div><div class="ep"><span class="ok">Online</span><b>File API</b><small>https://cdn.tkirbis30.ru/api/file</small></div><div class="ep"><span class="ok">Online</span><b>Media CDN</b><small>https://cdn.tkirbis30.ru/cdn/</small></div><div class="ep"><span class="ok">Online</span><b>Bot API Proxy</b><small>https://cdn.tkirbis30.ru/api/bot</small></div><div style="padding:12px 15px;color:#2563eb">View all endpoints →</div></div>
-<div class="panel" style="margin-top:18px"><div class="ph"><h2>Recent Logs</h2><span class="right">View all logs</span></div><div class="logs" id="logs"></div></div></div></div></main></div>
-<footer class="footer"><a href="#">Support</a>|<a href="#">System Status</a>|<a href="#">Documentation</a>|<a href="#">Report Security Issues</a>|<a href="#">Privacy Policy</a>|<span>© 2026 Gaford CDN</span></footer>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gaford CDN — Network Status</title>
+
+<style>
+*{box-sizing:border-box}
+
+body{
+    margin:0;
+    background:#f7f8fa;
+    color:#111827;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    font-size:14px;
+}
+
+.topbar{
+    height:62px;
+    background:#fff;
+    border-bottom:1px solid #e5e7eb;
+    display:flex;
+    align-items:center;
+    padding:0 28px;
+    gap:20px;
+}
+
+.brand{
+    font-size:20px;
+    font-weight:700;
+    letter-spacing:.2px;
+    display:flex;
+    align-items:center;
+    gap:10px;
+}
+
+.cloud{
+    width:30px;
+    height:19px;
+    position:relative;
+    display:inline-block;
+}
+
+.cloud:before{
+    content:"";
+    position:absolute;
+    left:3px;
+    top:7px;
+    width:25px;
+    height:10px;
+    background:#f59e0b;
+    border-radius:9px;
+}
+
+.cloud:after{
+    content:"";
+    position:absolute;
+    left:9px;
+    top:1px;
+    width:14px;
+    height:14px;
+    background:#fb923c;
+    border-radius:50%;
+}
+
+.domain{
+    border:1px solid #dfe3e8;
+    background:#fff;
+    border-radius:7px;
+    padding:8px 12px;
+    color:#374151;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:13px;
+}
+
+.header-right{
+    margin-left:auto;
+    display:flex;
+    align-items:center;
+    gap:18px;
+    color:#4b5563;
+}
+
+.header-link{
+    color:#374151;
+    text-decoration:none;
+}
+
+.main{
+    max-width:1250px;
+    margin:0 auto;
+    padding:34px 28px 70px;
+}
+
+.page-head{
+    display:flex;
+    align-items:flex-start;
+}
+
+h1{
+    margin:0;
+    font-size:30px;
+    letter-spacing:-.6px;
+}
+
+.subtitle{
+    color:#6b7280;
+    margin-top:5px;
+    font-size:15px;
+}
+
+.status{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    margin:7px 0 0 8px;
+    padding:4px 9px;
+    border-radius:999px;
+    background:#e8f7ed;
+    color:#15803d;
+    font-size:12px;
+    font-weight:600;
+}
+
+.status-dot{
+    width:7px;
+    height:7px;
+    border-radius:50%;
+    background:#16a34a;
+}
+
+.page-actions{
+    margin-left:auto;
+    display:flex;
+    gap:9px;
+}
+
+.button{
+    background:#fff;
+    border:1px solid #d9dee5;
+    border-radius:7px;
+    padding:9px 13px;
+    color:#1f2937;
+}
+
+.banner{
+    margin-top:22px;
+    background:#f7f8ff;
+    border:1px solid #cfd8ff;
+    border-radius:9px;
+    padding:13px 16px;
+    display:flex;
+    align-items:center;
+    gap:13px;
+}
+
+.telegram{
+    width:36px;
+    height:36px;
+    border-radius:50%;
+    background:#229ed9;
+    color:#fff;
+    display:grid;
+    place-items:center;
+    font-weight:700;
+    font-size:17px;
+}
+
+.banner-title{
+    color:#173ea5;
+    font-weight:600;
+}
+
+.banner-text{
+    color:#5b6475;
+    margin-top:3px;
+    font-size:12px;
+}
+
+.banner-right{
+    margin-left:auto;
+    border:1px solid #b9c6fa;
+    background:#fff;
+    color:#1d4ed8;
+    border-radius:7px;
+    padding:8px 12px;
+    font-size:13px;
+}
+
+.metrics{
+    display:grid;
+    grid-template-columns:repeat(6,1fr);
+    gap:13px;
+    margin-top:17px;
+}
+
+.metric{
+    background:#fff;
+    border:1px solid #e1e5ea;
+    border-radius:8px;
+    padding:15px;
+    min-height:112px;
+}
+
+.metric-label{
+    color:#4b5563;
+    font-size:12px;
+}
+
+.metric-value{
+    margin-top:8px;
+    font-size:22px;
+    font-weight:650;
+}
+
+.good{
+    color:#15803d;
+}
+
+.change-up{
+    color:#16a34a;
+    font-size:11px;
+    margin-left:5px;
+}
+
+.change-down{
+    color:#dc2626;
+    font-size:11px;
+    margin-left:5px;
+}
+
+.metric-note{
+    color:#6b7280;
+    font-size:11px;
+    margin-top:7px;
+}
+
+.content-grid{
+    display:grid;
+    grid-template-columns:minmax(0,2fr) minmax(320px,1fr);
+    gap:16px;
+    margin-top:17px;
+}
+
+.panel{
+    background:#fff;
+    border:1px solid #e1e5ea;
+    border-radius:9px;
+    overflow:hidden;
+}
+
+.panel-header{
+    padding:14px 16px;
+    border-bottom:1px solid #e5e7eb;
+    display:flex;
+    align-items:center;
+}
+
+.panel-title{
+    font-weight:650;
+    font-size:15px;
+}
+
+.panel-status{
+    margin-left:auto;
+    color:#15803d;
+    font-size:12px;
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+}
+
+th{
+    text-align:left;
+    color:#6b7280;
+    font-size:11px;
+    font-weight:600;
+    padding:10px 14px;
+    border-bottom:1px solid #edf0f2;
+}
+
+td{
+    padding:11px 14px;
+    border-bottom:1px solid #edf0f2;
+    font-size:13px;
+}
+
+tr:last-child td{
+    border-bottom:0;
+}
+
+.online{
+    color:#15803d;
+}
+
+.location{
+    white-space:nowrap;
+}
+
+.more{
+    padding:12px 14px;
+    color:#2563eb;
+    font-size:12px;
+    border-top:1px solid #edf0f2;
+}
+
+.endpoint{
+    padding:12px 15px;
+    border-bottom:1px solid #edf0f2;
+}
+
+.endpoint:last-child{
+    border-bottom:0;
+}
+
+.endpoint-name{
+    font-weight:600;
+}
+
+.endpoint-url{
+    display:block;
+    color:#6b7280;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:11px;
+    margin-top:4px;
+}
+
+.endpoint-status{
+    float:right;
+    color:#15803d;
+    font-size:11px;
+    font-weight:600;
+}
+
+.chart-panel{
+    margin-top:16px;
+}
+
+.chart{
+    height:245px;
+    padding:18px 18px 12px;
+}
+
+.chart-area{
+    height:190px;
+    border-bottom:1px solid #dfe3e8;
+    background:
+        linear-gradient(to bottom,
+        transparent 24%,
+        #edf0f3 25%,
+        transparent 26%,
+        transparent 49%,
+        #edf0f3 50%,
+        transparent 51%,
+        transparent 74%,
+        #edf0f3 75%,
+        transparent 76%);
+}
+
+.chart-area svg{
+    width:100%;
+    height:100%;
+}
+
+.chart-labels{
+    display:flex;
+    justify-content:space-between;
+    color:#9ca3af;
+    font-size:10px;
+    margin-top:7px;
+}
+
+.logs{
+    padding:0 15px;
+}
+
+.log{
+    padding:11px 0;
+    border-bottom:1px solid #edf0f2;
+    font-size:12px;
+}
+
+.log:last-child{
+    border-bottom:0;
+}
+
+.log-tag{
+    background:#e8f7ed;
+    color:#15803d;
+    padding:2px 5px;
+    border-radius:4px;
+    font-size:9px;
+    font-weight:700;
+    margin-right:7px;
+}
+
+.log-time{
+    color:#9ca3af;
+    margin-right:8px;
+}
+
+.log-details{
+    color:#6b7280;
+    margin-top:4px;
+    padding-left:55px;
+    font-size:11px;
+}
+
+.info-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+}
+
+.info{
+    padding:13px 15px;
+    border-bottom:1px solid #edf0f2;
+}
+
+.info:nth-child(odd){
+    border-right:1px solid #edf0f2;
+}
+
+.info-label{
+    color:#6b7280;
+    font-size:11px;
+}
+
+.info-value{
+    margin-top:4px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:12px;
+}
+
+.footer{
+    border-top:1px solid #e5e7eb;
+    background:#fff;
+    min-height:52px;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    gap:17px;
+    color:#6b7280;
+    font-size:11px;
+}
+
+.footer a{
+    color:#374151;
+    text-decoration:none;
+}
+
+@media(max-width:1050px){
+    .metrics{grid-template-columns:repeat(3,1fr)}
+    .content-grid{grid-template-columns:1fr}
+}
+
+@media(max-width:700px){
+    .topbar{padding:0 14px}
+    .header-link{display:none}
+    .main{padding:24px 14px 50px}
+    .metrics{grid-template-columns:repeat(2,1fr)}
+    .page-actions{display:none}
+    .banner-right{display:none}
+    .info-grid{grid-template-columns:1fr}
+    .info:nth-child(odd){border-right:0}
+}
+
+@media(max-width:480px){
+    .metrics{grid-template-columns:1fr}
+    h1{font-size:25px}
+}
+</style>
+</head>
+
+<body>
+
+<header class="topbar">
+    <div class="brand">
+        <span class="cloud"></span>
+        GAFORD
+    </div>
+
+    <div class="domain">cdn.tkirbis30.ru</div>
+
+    <div class="header-right">
+        <a class="header-link" href="#">Documentation</a>
+        <a class="header-link" href="#">Support</a>
+        <span>●</span>
+    </div>
+</header>
+
+<main class="main">
+
+    <div class="page-head">
+        <div>
+            <div style="display:flex;align-items:flex-start">
+                <h1>Gaford CDN</h1>
+                <span class="status">
+                    <span class="status-dot"></span>
+                    Active
+                </span>
+            </div>
+
+            <div class="subtitle">
+                Content Delivery Network for Gaford Telegram Bot
+            </div>
+        </div>
+
+        <div class="page-actions">
+            <button class="button">CDN Setup: Full</button>
+            <button class="button">▣ Documentation</button>
+        </div>
+    </div>
+
+    <div class="banner">
+        <div class="telegram">➤</div>
+
+        <div>
+            <div class="banner-title">
+                Optimized CDN for Gaford Bot Assets
+            </div>
+
+            <div class="banner-text">
+                Delivering files, images and media for Gaford users worldwide.
+            </div>
+        </div>
+
+        <div class="banner-right">
+            Bot: @gaford_bot ↗
+        </div>
+    </div>
+
+    <section class="metrics">
+
+        <div class="metric">
+            <div class="metric-label">Requests (24h)</div>
+            <div class="metric-value" id="requests">1.48M
+                <span class="change-up">↑ 18.6%</span>
+            </div>
+            <div class="metric-note">HTTP requests</div>
+        </div>
+
+        <div class="metric">
+            <div class="metric-label">Bandwidth (24h)</div>
+            <div class="metric-value" id="bandwidth">82.69 GB
+                <span class="change-up">↑ 22.4%</span>
+            </div>
+            <div class="metric-note">Data delivered</div>
+        </div>
+
+        <div class="metric">
+            <div class="metric-label">Cache Hit Ratio</div>
+            <div class="metric-value" id="cache">98.73%
+                <span class="change-up">↑ 1.2%</span>
+            </div>
+            <div class="metric-note">Cached responses</div>
+        </div>
+
+        <div class="metric">
+            <div class="metric-label">Errors (24h)</div>
+            <div class="metric-value" id="errors">312
+                <span class="change-down">↓ 14.8%</span>
+            </div>
+            <div class="metric-note">HTTP 4xx / 5xx</div>
+        </div>
+
+        <div class="metric">
+            <div class="metric-label">Edge Locations</div>
+            <div class="metric-value">24</div>
+            <div class="metric-note good">● All online</div>
+        </div>
+
+        <div class="metric">
+            <div class="metric-label">Network Status</div>
+            <div class="metric-value good" style="font-size:17px">
+                ✓ Operational
+            </div>
+            <div class="metric-note">All systems normal</div>
+        </div>
+
+    </section>
+
+    <div class="content-grid">
+
+        <div>
+
+            <section class="panel">
+
+                <div class="panel-header">
+                    <div class="panel-title">Edge Network</div>
+                    <div class="panel-status">
+                        ● All systems operational
+                    </div>
+                </div>
+
+                <table>
+
+                    <thead>
+                    <tr>
+                        <th>Location</th>
+                        <th>Status</th>
+                        <th>Latency</th>
+                        <th>Requests (24h)</th>
+                        <th>Bandwidth (24h)</th>
+                    </tr>
+                    </thead>
+
+                    <tbody id="edges">
+
+                    <tr>
+                        <td class="location">🇳🇱 Amsterdam, NL</td>
+                        <td class="online">Online</td>
+                        <td>12 ms</td>
+                        <td>186.2K</td>
+                        <td>12.48 GB</td>
+                    </tr>
+
+                    <tr>
+                        <td class="location">🇩🇪 Frankfurt, DE</td>
+                        <td class="online">Online</td>
+                        <td>14 ms</td>
+                        <td>173.6K</td>
+                        <td>10.23 GB</td>
+                    </tr>
+
+                    <tr>
+                        <td class="location">🇵🇱 Warsaw, PL</td>
+                        <td class="online">Online</td>
+                        <td>18 ms</td>
+                        <td>142.7K</td>
+                        <td>8.91 GB</td>
+                    </tr>
+
+                    <tr>
+                        <td class="location">🇺🇸 New York, US</td>
+                        <td class="online">Online</td>
+                        <td>68 ms</td>
+                        <td>254.1K</td>
+                        <td>17.82 GB</td>
+                    </tr>
+
+                    <tr>
+                        <td class="location">🇺🇸 Dallas, US</td>
+                        <td class="online">Online</td>
+                        <td>72 ms</td>
+                        <td>164.3K</td>
+                        <td>11.37 GB</td>
+                    </tr>
+
+                    <tr>
+                        <td class="location">🇸🇬 Singapore, SG</td>
+                        <td class="online">Online</td>
+                        <td>136 ms</td>
+                        <td>98.7K</td>
+                        <td>6.45 GB</td>
+                    </tr>
+
+                    </tbody>
+
+                </table>
+
+                <div class="more">
+                    View all locations (24) →
+                </div>
+
+            </section>
+
+            <section class="panel chart-panel">
+
+                <div class="panel-header">
+                    <div class="panel-title">CDN Analytics</div>
+
+                    <div style="margin-left:auto">
+                        <button class="button" style="padding:6px 9px">
+                            24 Hours⌄
+                        </button>
+                    </div>
+                </div>
+
+                <div class="chart">
+
+                    <div style="font-size:11px;color:#6b7280;margin-bottom:5px">
+                        <span style="color:#2563eb">◆</span> Requests
+                        &nbsp;&nbsp;
+                        <span style="color:#8b5cf6">◆</span> Bandwidth
+                    </div>
+
+                    <div class="chart-area">
+
+                        <svg viewBox="0 0 900 190"
+                             preserveAspectRatio="none">
+
+                            <polyline
+                                fill="none"
+                                stroke="#2563eb"
+                                stroke-width="2.2"
+                                points="
+                                0,125 35,140 70,132 105,147
+                                140,121 175,135 210,105
+                                245,124 280,98 315,110
+                                350,92 385,112 420,96
+                                455,103 490,82 525,101
+                                560,76 595,94 630,80
+                                665,103 700,67 735,84
+                                770,58 805,75 840,45
+                                875,57 900,39"/>
+
+                            <polyline
+                                fill="none"
+                                stroke="#8b5cf6"
+                                stroke-width="2"
+                                points="
+                                0,151 35,160 70,145 105,156
+                                140,138 175,150 210,132
+                                245,143 280,125 315,138
+                                350,127 385,143 420,131
+                                455,139 490,118 525,133
+                                560,111 595,129 630,116
+                                665,139 700,103 735,121
+                                770,107 805,130 840,91
+                                875,111 900,88"/>
+
+                        </svg>
+
+                    </div>
+
+                    <div class="chart-labels">
+                        <span>18:00</span>
+                        <span>21:00</span>
+                        <span>00:00</span>
+                        <span>03:00</span>
+                        <span>06:00</span>
+                        <span>09:00</span>
+                        <span>12:00</span>
+                        <span>15:00</span>
+                    </div>
+
+                </div>
+
+            </section>
+
+        </div>
+
+        <div>
+
+            <section class="panel">
+
+                <div class="panel-header">
+                    <div class="panel-title">Gaford Services</div>
+                </div>
+
+                <div class="endpoint">
+                    <span class="endpoint-status">Online</span>
+                    <div class="endpoint-name">Telegram Webhook</div>
+                    <span class="endpoint-url">
+                        cdn.tkirbis30.ru/webhook
+                    </span>
+                </div>
+
+                <div class="endpoint">
+                    <span class="endpoint-status">Online</span>
+                    <div class="endpoint-name">File Delivery</div>
+                    <span class="endpoint-url">
+                        cdn.tkirbis30.ru/files/
+                    </span>
+                </div>
+
+                <div class="endpoint">
+                    <span class="endpoint-status">Online</span>
+                    <div class="endpoint-name">Media CDN</div>
+                    <span class="endpoint-url">
+                        cdn.tkirbis30.ru/media/
+                    </span>
+                </div>
+
+                <div class="endpoint">
+                    <span class="endpoint-status">Online</span>
+                    <div class="endpoint-name">Bot API</div>
+                    <span class="endpoint-url">
+                        cdn.tkirbis30.ru/api/
+                    </span>
+                </div>
+
+                <div class="more">
+                    View service status →
+                </div>
+
+            </section>
+
+            <section class="panel" style="margin-top:16px">
+
+                <div class="panel-header">
+                    <div class="panel-title">Recent Activity</div>
+                    <div class="panel-status" style="color:#2563eb">
+                        Live
+                    </div>
+                </div>
+
+                <div class="logs" id="logs">
+
+                    <div class="log">
+                        <span class="log-tag">INFO</span>
+                        <span class="log-time">15:42:31</span>
+                        <b>File delivered</b>
+                        photo_1626.jpg
+                        <div class="log-details">
+                            Edge: Amsterdam, NL · Status: 200
+                        </div>
+                    </div>
+
+                    <div class="log">
+                        <span class="log-tag">INFO</span>
+                        <span class="log-time">15:42:28</span>
+                        <b>Cache HIT</b>
+                        /media/doc_12345.pdf
+                        <div class="log-details">
+                            Edge: Frankfurt, DE · Status: 200
+                        </div>
+                    </div>
+
+                    <div class="log">
+                        <span class="log-tag">INFO</span>
+                        <span class="log-time">15:42:25</span>
+                        <b>Webhook update received</b>
+                        <div class="log-details">
+                            Telegram API · Status: 200
+                        </div>
+                    </div>
+
+                    <div class="log">
+                        <span class="log-tag">INFO</span>
+                        <span class="log-time">15:42:21</span>
+                        <b>Media cached</b>
+                        video_9876.mp4
+                        <div class="log-details">
+                            Edge: Warsaw, PL · Status: 201
+                        </div>
+                    </div>
+
+                    <div class="log">
+                        <span class="log-tag">INFO</span>
+                        <span class="log-time">15:42:18</span>
+                        <b>Bot API request</b>
+                        sendMessage
+                        <div class="log-details">
+                            Gaford Bot API · Status: 200
+                        </div>
+                    </div>
+
+                </div>
+
+            </section>
+
+        </div>
+
+    </div>
+
+    <section class="panel" style="margin-top:16px">
+
+        <div class="panel-header">
+            <div class="panel-title">
+                Origin &amp; Network Information
+            </div>
+
+            <div class="panel-status" style="color:#6b7280">
+                Last updated: <span id="updated">--:--:--</span>
+            </div>
+        </div>
+
+        <div class="info-grid">
+
+            <div class="info">
+                <div class="info-label">CDN Hostname</div>
+                <div class="info-value">cdn.tkirbis30.ru</div>
+            </div>
+
+            <div class="info">
+                <div class="info-label">Origin</div>
+                <div class="info-value">Primary Gaford Origin</div>
+            </div>
+
+            <div class="info">
+                <div class="info-label">Transport</div>
+                <div class="info-value">HTTPS / HTTP/2 / TLS 1.3</div>
+            </div>
+
+            <div class="info">
+                <div class="info-label">Cache Engine</div>
+                <div class="info-value">GafordCache 4.1.7</div>
+            </div>
+
+            <div class="info">
+                <div class="info-label">IPv6</div>
+                <div class="info-value good">ENABLED</div>
+            </div>
+
+            <div class="info">
+                <div class="info-label">Global Uptime</div>
+                <div class="info-value" id="uptime">
+                    217 days 08:41:12
+                </div>
+            </div>
+
+        </div>
+
+    </section>
+
+</main>
+
+<footer class="footer">
+    <a href="#">Gaford</a>
+    <span>|</span>
+    <a href="#">System Status</a>
+    <span>|</span>
+    <a href="#">Documentation</a>
+    <span>|</span>
+    <a href="#">Support</a>
+    <span>|</span>
+    <a href="#">Privacy</a>
+    <span>|</span>
+    <span>© 2026 Gaford CDN</span>
+</footer>
+
 <script>
-const events=[['File delivered: image_4821.jpg','Edge: Amsterdam, NL','200'],['Cache HIT: /cdn/file/archive_1024.zip','Edge: Frankfurt, DE','200'],['Webhook update received','IP: 149.154.167.51','200'],['Media cached: sticker_pack_24.webp','Edge: Warsaw, PL','201'],['Bot API request proxied','Method: sendMessage','200'],['Cache MISS: /cdn/file/document_912.pdf','Origin: primary','200'],['File delivered: voice_771.ogg','Edge: New York, US','200']];
-function r(a,b){return Math.floor(Math.random()*(b-a+1))+a}function tick(){req.innerHTML=(1.38+Math.random()*.22).toFixed(2)+'M <span class="up">↑ '+(16+Math.random()*5).toFixed(1)+'%</span>';bw.innerHTML=(77+Math.random()*10).toFixed(2)+' GB <span class="up">↑ '+(19+Math.random()*6).toFixed(1)+'%</span>';hit.innerHTML=(98+Math.random()*.8).toFixed(2)+'% <span class="up">↑ 1.2%</span>';err.innerHTML=r(280,340)+' <span class="down">↓ '+(11+Math.random()*6).toFixed(1)+'%</span>';document.querySelectorAll('#edges tr').forEach((x,i)=>{x.children[2].textContent=[12,14,18,68,72,136][i]+r(-2,3)+' ms';x.children[3].textContent=(130+Math.random()*140).toFixed(1)+'K';x.children[4].textContent=(6+Math.random()*13).toFixed(2)+' GB'})}function log(){let e=events[r(0,events.length-1)],d=document.createElement('div');d.className='log';d.innerHTML='<span class="tag">INFO</span><span class="lt">'+new Date().toLocaleTimeString()+'</span><b>'+e[0]+'</b><br><span style="margin-left:74px;color:#6b7280">'+e[1]+' &nbsp; Status: '+e[2]+'</span>';logs.prepend(d);while(logs.children.length>5)logs.removeChild(logs.lastChild)}events.slice(0,5).forEach(e=>{let d=document.createElement('div');d.className='log';d.innerHTML='<span class="tag">INFO</span><span class="lt">15:42:31</span><b>'+e[0]+'</b><br><span style="margin-left:74px;color:#6b7280">'+e[1]+' &nbsp; Status: '+e[2]+'</span>';logs.appendChild(d)});tick();setInterval(tick,2500);setInterval(log,4200);
-</script></body></html>
+
+const logs = [
+    ["File delivered","image_4821.jpg","Edge: Amsterdam, NL · Status: 200"],
+    ["Cache HIT","/media/archive_1024.zip","Edge: Frankfurt, DE · Status: 200"],
+    ["Webhook update received","Telegram API","Status: 200"],
+    ["Media cached","sticker_pack_24.webp","Edge: Warsaw, PL · Status: 201"],
+    ["Bot API request","sendMessage","Gaford Bot API · Status: 200"],
+    ["Cache MISS","/media/document_912.pdf","Origin: Primary · Status: 200"],
+    ["File delivered","voice_771.ogg","Edge: New York, US · Status: 200"]
+];
+
+function random(min,max){
+    return Math.floor(Math.random()*(max-min+1))+min;
+}
+
+function updateStats(){
+
+    document.getElementById("requests").innerHTML =
+        (1.38 + Math.random()*.22).toFixed(2) +
+        "M <span class='change-up'>↑ " +
+        (16 + Math.random()*5).toFixed(1) +
+        "%</span>";
+
+    document.getElementById("bandwidth").innerHTML =
+        (77 + Math.random()*10).toFixed(2) +
+        " GB <span class='change-up'>↑ " +
+        (19 + Math.random()*6).toFixed(1) +
+        "%</span>";
+
+    document.getElementById("cache").innerHTML =
+        (98 + Math.random()*.8).toFixed(2) +
+        "% <span class='change-up'>↑ 1.2%</span>";
+
+    document.getElementById("errors").innerHTML =
+        random(280,340) +
+        " <span class='change-down'>↓ " +
+        (11 + Math.random()*6).toFixed(1) +
+        "%</span>";
+
+    const latencies = [12,14,18,68,72,136];
+    const rows = document.querySelectorAll("#edges tr");
+
+    rows.forEach((row,index)=>{
+
+        const cells = row.children;
+
+        cells[2].textContent =
+            latencies[index] + random(-2,3) + " ms";
+
+        cells[3].textContent =
+            (130 + Math.random()*140).toFixed(1) + "K";
+
+        cells[4].textContent =
+            (6 + Math.random()*13).toFixed(2) + " GB";
+
+    });
+
+    const now = new Date();
+
+    document.getElementById("updated").textContent =
+        now.toLocaleTimeString();
+
+}
+
+function addLog(){
+
+    const event =
+        logs[random(0,logs.length-1)];
+
+    const time =
+        new Date().toLocaleTimeString();
+
+    const div =
+        document.createElement("div");
+
+    div.className="log";
+
+    div.innerHTML =
+        "<span class='log-tag'>INFO</span>" +
+        "<span class='log-time'>" + time + "</span>" +
+        "<b>" + event[0] + "</b> " +
+        event[1] +
+        "<div class='log-details'>" +
+        event[2] +
+        "</div>";
+
+    const container =
+        document.getElementById("logs");
+
+    container.prepend(div);
+
+    while(container.children.length > 5)
+        container.removeChild(container.lastChild);
+
+}
+
+let seconds = 217*86400 + 8*3600 + 41*60 + 12;
+
+function updateUptime(){
+
+    seconds++;
+
+    const days =
+        Math.floor(seconds / 86400);
+
+    const hours =
+        Math.floor((seconds % 86400) / 3600);
+
+    const minutes =
+        Math.floor((seconds % 3600) / 60);
+
+    const secs =
+        seconds % 60;
+
+    document.getElementById("uptime").textContent =
+        days + " days " +
+        String(hours).padStart(2,"0") + ":" +
+        String(minutes).padStart(2,"0") + ":" +
+        String(secs).padStart(2,"0");
+
+}
+
+updateStats();
+
+setInterval(updateStats,2500);
+setInterval(addLog,4200);
+setInterval(updateUptime,1000);
+
+</script>
+
+</body>
+</html>
