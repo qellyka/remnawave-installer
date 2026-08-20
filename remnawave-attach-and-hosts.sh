@@ -62,15 +62,10 @@ gzip on;
 gzip_vary on;
 gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
 EOF
-  cat > /etc/nginx/sites-available/00-reject-unknown-sni <<'EOF'
-server {
-    listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
-    ssl_reject_handshake on;
-    server_name _;
-}
-EOF
-  ln -sf /etc/nginx/sites-available/00-reject-unknown-sni /etc/nginx/sites-enabled/00-reject-unknown-sni
+  # NOTE: as of the shared profile's current port layout, Reality+TCP no
+  # longer uses 443 (moved to 9443 specifically so it wouldn't compete with
+  # Nginx here) — the SNI-reject default_server is left disabled below
+  # anyway for now. See the port-conflict note further down for the history.
 }
 
 issue_cert_for_domain() {
@@ -240,27 +235,15 @@ read -rp "Нажми Enter, когда готов продолжать: "
 
 write_nginx_hardening
 issue_cert_for_domain "$HY2_DOMAIN"
-write_decoy_site
 
-cat > "/etc/nginx/sites-available/hy2-$HY2_DOMAIN" <<EOF
-server {
-    listen 80; server_name $HY2_DOMAIN;
-    location /.well-known/acme-challenge/ { root /var/www/certbot; }
-    location / { return 301 https://\$host\$request_uri; }
-}
-server {
-    listen 443 ssl http2; server_name $HY2_DOMAIN;
-    ssl_certificate     /etc/letsencrypt/live/$HY2_DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$HY2_DOMAIN/privkey.pem;
-    include /etc/nginx/snippets/ssl-params.conf;
-    location / {
-        root /var/www/decoy-cdn;
-        index index.html;
-    }
-}
-EOF
-ln -sf "/etc/nginx/sites-available/hy2-$HY2_DOMAIN" /etc/nginx/sites-enabled/
-rm -f /etc/nginx/sites-enabled/default
+# NOTE: no Nginx site is written here for $HY2_DOMAIN on 443 (Hysteria2's
+# own inbound already has a built-in masquerade — proxies to bing.com for
+# anything that isn't real Hysteria2/QUIC traffic — so a local decoy site on
+# the domain adds little). This used to be load-bearing (the shared
+# profile's Reality+TCP inbound needed sole ownership of 443, and Nginx here
+# broke it outright), but Reality+TCP has since moved off 443 (now 9443),
+# so that conflict no longer applies — this is just left as-is for
+# simplicity, not because it's still required. Restorable if wanted.
 
 HY2_CERT_PEM=""
 HY2_KEY_PEM=""
