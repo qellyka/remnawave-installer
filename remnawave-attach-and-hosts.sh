@@ -35,6 +35,7 @@ wait_for_apt_lock() {
     fi
   done
   [[ $waited -gt 0 ]] && log "Дождался освобождения apt/dpkg (${waited}s)."
+  return 0
 }
 
 DECOY_SITE_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/index.html"
@@ -142,7 +143,8 @@ read -rp "API-токен: " API_TOKEN
 wait_for_apt_lock
 apt-get update -qq || true
 wait_for_apt_lock
-apt-get install -y -qq curl python3 openssl dnsutils nginx certbot
+apt-get install -y -qq curl python3 openssl dnsutils nginx certbot \
+  || die "apt-get install не смог поставить один из пакетов (curl python3 openssl dnsutils nginx certbot) — прочитай вывод apt выше для точной причины"
 
 cat > /tmp/remnawave_list_nodes.py <<'LISTEOF'
 #!/usr/bin/env python3
