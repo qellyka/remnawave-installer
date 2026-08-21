@@ -77,9 +77,22 @@ read_clean "URL панели (panel.example.com или https://panel.example.com
 [[ "$PANEL_URL" =~ ^https?:// ]] || PANEL_URL="https://$PANEL_URL"
 PANEL_URL="${PANEL_URL%/}"
 
-read -rp "Логин администратора панели: " RW_LOGIN
-read -rsp "Пароль администратора: " RW_PASSWORD; echo
-[[ -n "$RW_LOGIN" && -n "$RW_PASSWORD" ]] || die "Логин и пароль обязательны"
+echo ""
+echo "Авторизация в панели:"
+echo "  1) Готовый API-токен — СОЗДАЙ его в UI: Settings -> API Tokens (рекомендуется)"
+echo "  2) Логин + пароль (скрипт попробует выпустить токен сам — многие панели"
+echo "     это ЗАПРЕЩАЮТ и вернут 403 'must create own API-token')"
+read -rp "Введите номер [1-2]: " AUTH_CHOICE
+API_TOKEN=""; RW_LOGIN=""; RW_PASSWORD=""
+if [[ "$AUTH_CHOICE" == "2" ]]; then
+  read -rp "Логин администратора панели: " RW_LOGIN
+  read -rsp "Пароль администратора: " RW_PASSWORD; echo
+  [[ -n "$RW_LOGIN" && -n "$RW_PASSWORD" ]] || die "Логин и пароль обязательны"
+else
+  read -rp "API-токен: " API_TOKEN
+  API_TOKEN="$(echo "$API_TOKEN" | tr -d '[:space:]')"
+  [[ -n "$API_TOKEN" ]] || die "Токен пуст"
+fi
 
 read_clean "Имя ноды в панели (например DE-1): " NODE_NAME 'A-Za-z0-9 _.-'
 [[ -n "$NODE_NAME" ]] || NODE_NAME="node-$(date +%s)"
@@ -161,9 +174,10 @@ PANEL_IP=$(dig +short "$PANEL_HOST" A | tail -n1 || true)
 [[ -n "$PANEL_IP" ]] && log "IP панели ($PANEL_HOST): $PANEL_IP — открою NODE_PORT только ему."
 
 # ---------------------------------------------------------------------------
-# Авторизация: логин -> выпуск API-токена (единственный рабочий путь в v3)
+# Авторизация
 # ---------------------------------------------------------------------------
-cat > /tmp/rw_mint_token.py <<'MINTEOF'
+if [[ "$AUTH_CHOICE" == "2" ]]; then
+  cat > /tmp/rw_mint_token.py <<'MINTEOF'
 import json, os, sys, urllib.request, urllib.error
 PANEL = os.environ["RW_PANEL_URL"].rstrip("/")
 
@@ -190,34 +204,68 @@ if not jwt:
     print(f"[ERROR] Панель не вернула accessToken (2FA? неверный пароль?): {json.dumps(r)[:200]}",
           file=sys.stderr); sys.exit(1)
 
-# POST /api/tokens разрешён ТОЛЬКО админским JWT. Тело: строго {tokenName}
-# (лишние поля панель отбрасывает как невалидные — 400).
+# Тело зависит от версии панели. Актуальная (docs.rw): {name, expiresInDays,
+# scopes}. scopes:["*"] = полный доступ (без него токен может быть бесправным).
+# Старые версии: {tokenName}. Пробуем по очереди, выходим на первом успехе.
+tname = "node-deploy-" + os.urandom(2).hex()
+bodies = [
+    {"name": tname, "expiresInDays": 3650, "scopes": ["*"]},
+    {"name": tname, "expiresInDays": 3650},
+    {"tokenName": "node-deploy"},
+]
 errors = []
 for path in ("/api/tokens", "/api/api-tokens"):
-    resp2, err = call(path, "POST", {"tokenName": "node-deploy"}, token=jwt)
-    if err:
-        errors.append(f"{path} -> {err}")
-        continue
-    node = resp2.get("response") or resp2
-    tok = node.get("token") or node.get("apiToken") or node.get("accessToken")
-    if tok:
-        print(tok); sys.exit(0)
-    errors.append(f"{path} -> ответ без поля token: {json.dumps(resp2)[:200]}")
-print("[ERROR] Не смог выпустить API-токен. Ответы панели:", file=sys.stderr)
+    for body in bodies:
+        resp2, err = call(path, "POST", body, token=jwt)
+        if err:
+            errors.append(f"{path} [{','.join(body)}] -> {err}")
+            continue
+        node = resp2.get("response") or resp2
+        tok = node.get("token") or node.get("apiToken") or node.get("accessToken")
+        if tok:
+            print(tok); sys.exit(0)
+        errors.append(f"{path} -> ответ без поля token: {json.dumps(resp2)[:200]}")
+print("[ERROR] Панель не дала выпустить токен из логина:", file=sys.stderr)
 for e in errors:
     print("  " + e, file=sys.stderr)
-print("Если панель другой версии — создай токен в UI (Settings -> API Tokens) "
-      "и используй скрипт remnawave-node-provision.sh с готовым токеном.", file=sys.stderr)
+print("Если везде 403 'must create own API-token' — эта панель блокирует "
+      "программный выпуск. Создай токен вручную: Settings -> API Tokens -> Create "
+      "(scope '*'), и перезапусти с вариантом 1 (готовый токен).", file=sys.stderr)
 sys.exit(2)
 MINTEOF
+  log "Логинюсь и выпускаю API-токен..."
+  API_TOKEN=$(RW_PANEL_URL="$PANEL_URL" RW_LOGIN="$RW_LOGIN" RW_PASSWORD="$RW_PASSWORD" \
+    python3 /tmp/rw_mint_token.py) \
+    || die "Не удалось выпустить токен. Создай его в UI (Settings -> API Tokens) и запусти заново с вариантом 1."
+  unset RW_PASSWORD
+  rm -f /tmp/rw_mint_token.py
+  log "API-токен получен."
+fi
 
-log "Логинюсь и выпускаю API-токен..."
-API_TOKEN=$(RW_PANEL_URL="$PANEL_URL" RW_LOGIN="$RW_LOGIN" RW_PASSWORD="$RW_PASSWORD" \
-  python3 /tmp/rw_mint_token.py) \
-  || die "Не удалось выпустить токен (см. ошибку выше)."
-unset RW_PASSWORD
-rm -f /tmp/rw_mint_token.py
-log "API-токен получен."
+# Проверяем токен (обе ветки): реальный вызов к /api/*.
+cat > /tmp/rw_check_token.py <<'CHKEOF'
+import json, os, sys, urllib.request, urllib.error
+PANEL = os.environ["RW_PANEL_URL"].rstrip("/"); TOK = os.environ["RW_API_TOKEN"]
+req = urllib.request.Request(PANEL + "/api/hosts", method="GET")
+req.add_header("Authorization", "Bearer " + TOK)
+try:
+    with urllib.request.urlopen(req, timeout=20) as r:
+        r.read(); print("OK")
+except urllib.error.HTTPError as e:
+    body = e.read().decode(errors='replace')[:300]
+    print(f"[ERROR] Токен не принят: HTTP {e.code}: {body}", file=sys.stderr)
+    if e.code == 403 and "must create own API-token" in body:
+        print("Это не API-токен (похоже на админскую сессию). Создай именно API Token "
+              "в UI: Settings -> API Tokens -> Create, и вставь его.", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"[ERROR] {e}", file=sys.stderr); sys.exit(1)
+CHKEOF
+log "Проверяю токен..."
+RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN" python3 /tmp/rw_check_token.py \
+  || die "Токен не работает (см. выше)."
+rm -f /tmp/rw_check_token.py
+log "Токен рабочий."
 
 # Сохраним токен для повторных прогонов (chmod 600).
 umask 077; echo "$API_TOKEN" > "$NODE_DIR.token" 2>/dev/null || echo "$API_TOKEN" > /root/.rw_node_token
