@@ -190,18 +190,24 @@ if not jwt:
     print(f"[ERROR] Панель не вернула accessToken (2FA? неверный пароль?): {json.dumps(r)[:200]}",
           file=sys.stderr); sys.exit(1)
 
-# POST /api/api-tokens разрешён ТОЛЬКО админским JWT — это и есть штатный мост.
-for path in ("/api/api-tokens", "/api/tokens"):
-    for body in ({"tokenName": "node-deploy", "tokenDescription": "auto-deploy"},
-                 {"name": "node-deploy", "description": "auto-deploy"}):
-        resp2, err = call(path, "POST", body, token=jwt)
-        if err: continue
-        node = resp2.get("response") or resp2
-        tok = node.get("token") or node.get("apiToken") or node.get("accessToken")
-        if tok:
-            print(tok); sys.exit(0)
-print("[ERROR] Не смог выпустить API-токен. Создай его в UI (Settings -> API Tokens) "
-      "и запусти вариант скрипта, который принимает готовый токен.", file=sys.stderr)
+# POST /api/tokens разрешён ТОЛЬКО админским JWT. Тело: строго {tokenName}
+# (лишние поля панель отбрасывает как невалидные — 400).
+errors = []
+for path in ("/api/tokens", "/api/api-tokens"):
+    resp2, err = call(path, "POST", {"tokenName": "node-deploy"}, token=jwt)
+    if err:
+        errors.append(f"{path} -> {err}")
+        continue
+    node = resp2.get("response") or resp2
+    tok = node.get("token") or node.get("apiToken") or node.get("accessToken")
+    if tok:
+        print(tok); sys.exit(0)
+    errors.append(f"{path} -> ответ без поля token: {json.dumps(resp2)[:200]}")
+print("[ERROR] Не смог выпустить API-токен. Ответы панели:", file=sys.stderr)
+for e in errors:
+    print("  " + e, file=sys.stderr)
+print("Если панель другой версии — создай токен в UI (Settings -> API Tokens) "
+      "и используй скрипт remnawave-node-provision.sh с готовым токеном.", file=sys.stderr)
 sys.exit(2)
 MINTEOF
 
@@ -442,18 +448,27 @@ if "__error__" in r:
         "Если 403 'must create own API-token' — токен нулевого скоупа; пересоздай в UI.")
 elog("      OK.")
 
-def gen_x25519():
+# Ключи Reality: правильный эндпоинт возвращает МАССИВ из 30 пар. Берём 3.
+def get_reality_keys(n):
+    r = api("GET", "/api/system/tools/x25519/generate", fatal=False)
+    if "__error__" not in r:
+        b = r.get("response", r)
+        kps = b.get("keypairs") if isinstance(b, dict) else None
+        if kps and len(kps) >= n:
+            return [kp["privateKey"] for kp in kps[:n]]
+    # fallback: старые пути (одиночный ключ)
     for path in ("/api/system/x25519-key-pair", "/api/keygen/pub-key"):
-        resp = api("GET", path, fatal=False)
-        if "__error__" in resp: continue
-        b = resp.get("response", resp)
+        rr = api("GET", path, fatal=False)
+        if "__error__" in rr: continue
+        b = rr.get("response", rr)
         if isinstance(b, dict):
             priv = b.get("privateKey") or b.get("private_key")
-            if priv: return priv
-    die("Не смог сгенерировать ключ Reality (панель не отдала x25519).")
+            if priv: return [priv] * n
+    die("Не смог получить ключи Reality (/api/system/tools/x25519/generate не ответил).")
 
-elog("[2/7] Генерирую ключи Reality...")
-tcp_key = gen_x25519(); grpc_key = gen_x25519(); xhttp_key = gen_x25519()
+elog("[2/7] Получаю ключи Reality...")
+_rkeys = get_reality_keys(3)
+tcp_key, grpc_key, xhttp_key = _rkeys[0], _rkeys[1], _rkeys[2]
 tcp_sid = os.environ["RW_SID_TCP"]; grpc_sid = os.environ["RW_SID_GRPC"]; xhttp_sid = os.environ["RW_SID_XHTTP"]
 xhttp_path = os.environ["RW_XHTTP_PATH"]
 
@@ -533,8 +548,7 @@ if ENABLE_BRIDGE: active_tags.append(T_BRIDGE)
 active_uuids = [tag_uuid[t] for t in active_tags]
 
 elog("[4/7] Создаю НОДУ в панели...")
-# Порядок полей — суперсет; лишние панель игнорирует, обязательные (name,
-# address, port) на месте. Профиль привязываем сразу.
+# Поля сверены с CreateNodeRequestDto (required: name, address, configProfile).
 node_body = {
     "name": NODE_NAME,
     "address": NODE_ADDRESS,
@@ -548,9 +562,7 @@ node_body = {
 }
 node = api("POST", "/api/nodes", node_body, fatal=False)
 if "__error__" in node:
-    # Некоторые сборки требуют создавать ноду без профиля, привязывать потом.
-    nb2 = dict(node_body); nb2.pop("configProfile", None)
-    node = api("POST", "/api/nodes", nb2)
+    die(f"Создание ноды не прошло: {node['__error__']}")
 node = node["response"]
 NODE_UUID = node.get("uuid") or node.get("nodeUuid")
 if not NODE_UUID:
@@ -610,7 +622,7 @@ if ENABLE_CDN:
     mkhost(T_CDN, {"remark": remark(f"CDN {CDN_PUBLIC}"), "address": CDN_PUBLIC, "port": 443,
         "sni": CDN_PUBLIC, "host": CDN_PUBLIC, "path": CDN_PATH, "alpn": "h3,h2,http/1.1",
         "fingerprint": "random", "securityLayer": "TLS",
-        "xhttpExtraParams": {"mode": "packet-up", "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache",
+        "xHttpExtraParams": {"mode": "packet-up", "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache",
             "xPaddingMethod": "tokenish", "uplinkHTTPMethod": "get", "xPaddingObfsMode": True,
             "xPaddingPlacement": "queryInHeader"}})
 # BRIDGE_IN — хост НЕ создаём: клиенты к нему не подключаются (это межнодовый вход).
