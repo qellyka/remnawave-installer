@@ -563,7 +563,7 @@ if ENABLE_CDN:
          "streamSettings": {"network": "xhttp", "security": "none",
              "xhttpSettings": {"mode": "packet-up", "path": CDN_PATH,
                  "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache", "xPaddingMethod": "tokenish",
-                 "uplinkHTTPMethod": "get", "xPaddingObfsMode": True, "xPaddingPlacement": "queryInHeader"}}})
+                 "uplinkHTTPMethod": "GET", "xPaddingObfsMode": True, "xPaddingPlacement": "queryInHeader"}}})
 if ENABLE_BRIDGE:
     # Точная копия покупного BRIDGE_IN: vless/tcp/none, слушает 0.0.0.0:8888.
     # Вход для server-side routing — трафик приходит с ноды-источника.
@@ -700,7 +700,7 @@ if ENABLE_CDN:
         "sni": CDN_PUBLIC, "host": CDN_PUBLIC, "path": CDN_PATH, "alpn": "h3,h2,http/1.1",
         "fingerprint": "random", "securityLayer": "TLS",
         "xHttpExtraParams": {"mode": "packet-up", "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache",
-            "xPaddingMethod": "tokenish", "uplinkHTTPMethod": "get", "xPaddingObfsMode": True,
+            "xPaddingMethod": "tokenish", "uplinkHTTPMethod": "GET", "xPaddingObfsMode": True,
             "xPaddingPlacement": "queryInHeader"}})
 # BRIDGE_IN — хост НЕ создаём: клиенты к нему не подключаются (это межнодовый вход).
 
