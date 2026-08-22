@@ -699,7 +699,7 @@ if ENABLE_CDN:
     mkhost(T_CDN, {"remark": remark(f"CDN {CDN_PUBLIC}"), "address": CDN_PUBLIC, "port": 443,
         "sni": CDN_PUBLIC, "host": CDN_PUBLIC, "path": CDN_PATH, "alpn": "h3,h2,http/1.1",
         "fingerprint": "random", "securityLayer": "TLS",
-        "xHttpExtraParams": {"mode": "packet-up", "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache",
+        "xhttpExtraParams": {"mode": "packet-up", "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache",
             "xPaddingMethod": "tokenish", "uplinkHTTPMethod": "GET", "xPaddingObfsMode": True,
             "xPaddingPlacement": "queryInHeader"}})
 # BRIDGE_IN — хост НЕ создаём: клиенты к нему не подключаются (это межнодовый вход).
