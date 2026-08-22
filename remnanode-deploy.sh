@@ -570,22 +570,33 @@ if ENABLE_BRIDGE:
          "streamSettings": {"network": "tcp", "security": "none"}})
 
 safe = re.sub(r"[^A-Za-z0-9_\s-]", "-", NODE_DOMAIN)
-PROFILE_NAME = f"node-{safe}"[:30].rstrip("-")
+rnd = (SUFFIX.split("-")[-1] or os.urandom(3).hex())[:6]
+# Уникальное имя (домен + рандом) — чтобы повторный прогон не ловил 409.
+PROFILE_NAME = (f"node-{safe}"[:23].rstrip("-")) + "-" + rnd
 
+profile_config = {
+    "log": {"loglevel": "warning"},
+    "dns": {"servers": [{"address": "8.8.8.8", "skipFallback": False}], "queryStrategy": "UseIPv4"},
+    "inbounds": inbounds,
+    "outbounds": [{"tag": "direct", "protocol": "freedom"},
+                  {"tag": "block", "protocol": "blackhole"}],
+    "routing": {"rules": [
+        {"ip": ["geoip:private"], "type": "field", "outboundTag": "direct"},
+        {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"}]},
+}
 elog(f"[3/7] Создаю Config Profile '{PROFILE_NAME}' ({len(inbounds)} инбаундов)...")
-prof = api("POST", "/api/config-profiles", {
-    "name": PROFILE_NAME,
-    "config": {
-        "log": {"loglevel": "warning"},
-        "dns": {"servers": [{"address": "8.8.8.8", "skipFallback": False}], "queryStrategy": "UseIPv4"},
-        "inbounds": inbounds,
-        "outbounds": [{"tag": "direct", "protocol": "freedom"},
-                      {"tag": "block", "protocol": "blackhole"}],
-        "routing": {"rules": [
-            {"ip": ["geoip:private"], "type": "field", "outboundTag": "direct"},
-            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"}]},
-    },
-})["response"]
+prof = None
+for attempt in range(4):
+    r = api("POST", "/api/config-profiles", {"name": PROFILE_NAME, "config": profile_config}, fatal=False)
+    if "__error__" not in r:
+        prof = r["response"]; break
+    if "409" in r["__error__"] or "already exists" in r["__error__"]:
+        PROFILE_NAME = (f"node-{safe}"[:19].rstrip("-")) + "-" + os.urandom(3).hex()
+        elog(f"      имя занято, пробую '{PROFILE_NAME}'...")
+        continue
+    die(f"POST /api/config-profiles -> {r['__error__']}")
+if prof is None:
+    die("Не смог создать Config Profile (имя постоянно занято).")
 PROFILE_UUID = prof["uuid"]
 tag_uuid = {ib["tag"]: ib["uuid"] for ib in prof["inbounds"]}
 elog(f"      Профиль: {PROFILE_UUID}")
@@ -608,10 +619,26 @@ node_body = {
     "consumptionMultiplier": 1.0,
     "configProfile": {"activeConfigProfileUuid": PROFILE_UUID, "activeInbounds": active_uuids},
 }
-node = api("POST", "/api/nodes", node_body, fatal=False)
-if "__error__" in node:
-    die(f"Создание ноды не прошло: {node['__error__']}")
-node = node["response"]
+node = None
+_orig_name = NODE_NAME
+for attempt in range(3):
+    node_body["name"] = NODE_NAME
+    r = api("POST", "/api/nodes", node_body, fatal=False)
+    if "__error__" not in r:
+        node = r["response"]; break
+    err = r["__error__"]
+    low = err.lower()
+    if ("409" in err or "already exists" in low) and ("name" in low and "address" not in low):
+        NODE_NAME = f"{_orig_name}-{os.urandom(2).hex()}"
+        elog(f"      имя ноды занято, пробую '{NODE_NAME}'...")
+        continue
+    if "409" in err or "already exists" in low:
+        die("Нода с таким адресом уже есть в панели (возможно, твоя рабочая/покупная нода "
+            f"на {NODE_ADDRESS}). Скрипт НЕ трогает её, чтобы не сломать. Удали тестовую "
+            "ноду в панели или ставь на другой сервер/адрес. Ответ: " + err)
+    die(f"Создание ноды не прошло: {err}")
+if node is None:
+    die("Не смог создать ноду (имя постоянно занято).")
 NODE_UUID = node.get("uuid") or node.get("nodeUuid")
 if not NODE_UUID:
     die(f"Нода создана, но не вернулся uuid: {json.dumps(node)[:300]}")
@@ -688,11 +715,29 @@ if SQUAD_MODE == "NONE":
     elog("      Пропускаю — инбаунды ни в один сквад не добавлены (включишь в UI).")
 elif SQUAD_MODE == "NEW" and NEW_SQUAD_NAME:
     r = api("POST", "/api/internal-squads", {"name": NEW_SQUAD_NAME, "inbounds": active_uuids}, fatal=False)
-    if "__error__" in r:
-        elog(f"      [WARN] Не создал сквад '{NEW_SQUAD_NAME}': {r['__error__']}")
-    else:
+    if "__error__" not in r:
         newu = (r.get("response") or r).get("uuid", "?")
         elog(f"      Создан сквад '{NEW_SQUAD_NAME}' -> {newu} с {len(active_uuids)} инбаундами.")
+    elif "409" in r["__error__"] or "already exists" in r["__error__"].lower():
+        # Сквад с таким именем уже есть (повторный прогон) — до-мержим в него.
+        elog(f"      Сквад '{NEW_SQUAD_NAME}' уже есть — добавляю инбаунды в него.")
+        sq = api("GET", "/api/internal-squads", fatal=False)
+        merged_ok = False
+        if "__error__" not in sq:
+            b = sq.get("response", sq)
+            squads = b.get("internalSquads") if isinstance(b, dict) else b
+            for s in (squads or []):
+                if s.get("name") != NEW_SQUAD_NAME: continue
+                cur = [ib["uuid"] if isinstance(ib, dict) else ib for ib in (s.get("inbounds") or [])]
+                merged = list(dict.fromkeys(cur + active_uuids))
+                pl = {"uuid": s["uuid"], "name": s.get("name"), "inbounds": merged}
+                rr = api("PATCH", f"/api/internal-squads/{s['uuid']}", pl, fatal=False)
+                if "__error__" not in rr: merged_ok = True; elog(f"      Обновлён '{NEW_SQUAD_NAME}'.")
+                else: elog(f"      [WARN] {rr['__error__']}")
+        if not merged_ok:
+            elog("      [WARN] Не удалось до-мержить — проверь сквад в UI.")
+    else:
+        elog(f"      [WARN] Не создал сквад '{NEW_SQUAD_NAME}': {r['__error__']}")
 else:
     sq = api("GET", "/api/internal-squads", fatal=False)
     done = False
