@@ -30,9 +30,7 @@ hr()   { echo "---------------------------------------------------"; }
 [[ $EUID -eq 0 ]] || die "Запускай от root (sudo)."
 
 DECOY_SITE_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/index.html"
-XRAY_INSTALLER_URL="https://raw.githubusercontent.com/remnawave/scripts/main/scripts/install-latest-xray.sh"
 NODE_DIR="/opt/remnanode"
-XRAY_CUSTOM="$NODE_DIR/xray-custom"
 SSL_DIR="/etc/nginx/ssl"
 NODE_IMAGE="ghcr.io/remnawave/node:latest"
 
@@ -416,31 +414,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Свежий официальный Xray (кладём заранее, смонтируем в compose ноды)
-# ---------------------------------------------------------------------------
-log "Скачиваю свежий официальный Xray..."
+# Xray НЕ подменяем. Образ node:latest уже несёт совместимый xray, а нода
+# отдаёт ему конфиг через свой внутренний механизм (@rwint.../internal/
+# get-config). Подмонтированный сторонний бинарник этот механизм не понимает
+# и падает (exitcode 23, "failed to load config @rwint..."). Дока Remnawave
+# прямо не советует монтировать своё в xray. Нужна особая версия — ставь
+# официальным способом:
+#   bash <(curl -fsSL https://raw.githubusercontent.com/remnawave/scripts/main/scripts/install-latest-xray.sh)
 mkdir -p "$NODE_DIR"
-ARCH_RAW="$(uname -m)"
-case "$ARCH_RAW" in
-  x86_64|amd64) XARCH="64" ;;
-  aarch64|arm64) XARCH="arm64-v8a" ;;
-  armv7l|armv7) XARCH="arm32-v7a" ;;
-  *) XARCH="" ; warn "Необычная архитектура $ARCH_RAW — оставлю штатный Xray из образа." ;;
-esac
-XRAY_MOUNTED=false
-if [[ -n "$XARCH" ]]; then
-  XTMP="$(mktemp -d)"
-  if curl -RL -H 'Cache-Control: no-cache' --max-time 120 -o "$XTMP/xray.zip" \
-       "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$XARCH.zip" 2>/dev/null \
-     && unzip -qo "$XTMP/xray.zip" xray -d "$XTMP" 2>/dev/null && [[ -f "$XTMP/xray" ]]; then
-    install -m 755 "$XTMP/xray" "$XRAY_CUSTOM"
-    XRAY_MOUNTED=true
-    log "Xray: $("$XRAY_CUSTOM" version 2>/dev/null | head -1 || echo '?')"
-  else
-    warn "Не смог скачать Xray — нода поднимется со штатным. Позже: bash <(curl -fsSL $XRAY_INSTALLER_URL)"
-  fi
-  rm -rf "$XTMP"
-fi
 
 # ---------------------------------------------------------------------------
 # Провижининг в панели: профиль (6 инбаундов) + СОЗДАНИЕ ноды + хосты + сквады
@@ -801,13 +782,12 @@ rm -f /tmp/rw_deploy.py
 # docker-compose.yml ноды + запуск
 # ---------------------------------------------------------------------------
 log "Пишу docker-compose.yml ноды и поднимаю контейнер..."
-XRAY_VOL=""
-[[ "$XRAY_MOUNTED" == "true" ]] && XRAY_VOL="      - $XRAY_CUSTOM:/usr/local/bin/xray"
 cat > "$NODE_DIR/.env" <<EOF
 NODE_PORT=$NODE_PORT
 SECRET_KEY=$SECRET_KEY
 EOF
 chmod 600 "$NODE_DIR/.env"
+# Xray НЕ монтируем (см. выше) — только сертификаты для Hysteria2/TLS-инбаундов.
 cat > "$NODE_DIR/docker-compose.yml" <<EOF
 services:
   remnanode:
@@ -820,10 +800,7 @@ services:
       - .env
     volumes:
       - /etc/nginx/ssl:/etc/nginx/ssl:ro
-$XRAY_VOL
 EOF
-# убрать пустую строку, если Xray не монтируем
-sed -i '/^$/d' "$NODE_DIR/docker-compose.yml"
 ( cd "$NODE_DIR" && docker compose up -d ) || warn "docker compose up вернул ошибку — проверь: docker logs remnanode"
 
 # ---------------------------------------------------------------------------
