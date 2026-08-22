@@ -34,8 +34,7 @@ NODE_DIR="/opt/remnanode"
 SSL_DIR="/etc/nginx/ssl"
 NODE_IMAGE="ghcr.io/remnawave/node:latest"
 
-# Порты инбаундов — покупная схема + два прямых Reality + мост.
-PORT_REALITY_TCP=9443
+# Порты инбаундов — покупная схема + мост.
 PORT_REALITY_GRPC=2083
 PORT_REALITY_XHTTP=2053
 PORT_HY2=8443          # UDP; TCP 8443 занимает nginx-камуфляж
@@ -170,6 +169,18 @@ else
 fi
 PANEL_IP=$(dig +short "$PANEL_HOST" A | tail -n1 || true)
 [[ -n "$PANEL_IP" ]] && log "IP панели ($PANEL_HOST): $PANEL_IP — открою NODE_PORT только ему."
+
+# Версия xray в образе ноды -> minClientVer (отсекает старые Reality-клиенты).
+MIN_CLIENT_VER="26.7.28"   # фолбэк, если не удалось определить
+log "Определяю версию Xray в образе ноды (для minClientVer)..."
+docker pull "$NODE_IMAGE" >/dev/null 2>&1 || true
+_ver=$(docker run --rm --entrypoint /usr/local/bin/xray "$NODE_IMAGE" version 2>/dev/null \
+  | grep -oE 'Xray [0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk '{print $2}')
+if [[ "$_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  MIN_CLIENT_VER="$_ver"; log "minClientVer = $MIN_CLIENT_VER (ядро ноды)."
+else
+  warn "Не определил версию Xray — беру minClientVer=$MIN_CLIENT_VER по умолчанию."
+fi
 
 # ---------------------------------------------------------------------------
 # Авторизация
@@ -462,7 +473,7 @@ ENABLE_CDN = os.environ.get("RW_ENABLE_CDN") == "true"
 ENABLE_BRIDGE = os.environ.get("RW_ENABLE_BRIDGE") == "true"
 CDN_PUBLIC = os.environ.get("RW_CDN_PUBLIC_DOMAIN", "")
 CDN_PATH = os.environ.get("RW_CDN_PATH", "/uploadfiles/")
-P_TCP = int(os.environ["RW_PORT_REALITY_TCP"]); P_GRPC = int(os.environ["RW_PORT_REALITY_GRPC"])
+P_GRPC = int(os.environ["RW_PORT_REALITY_GRPC"])
 P_XHTTP = int(os.environ["RW_PORT_REALITY_XHTTP"]); P_HY2 = int(os.environ["RW_PORT_HY2"])
 P_CDN = int(os.environ["RW_PORT_CDN_LOCAL"]); P_BRIDGE = int(os.environ["RW_PORT_BRIDGE"])
 SNI = os.environ.get("RW_SNI_DONOR", "www.google.com")
@@ -496,42 +507,54 @@ def get_reality_keys(n):
     die("Не смог получить ключи Reality (/api/system/tools/x25519/generate не ответил).")
 
 elog("[2/7] Получаю ключи Reality...")
-_rkeys = get_reality_keys(3)
-tcp_key, grpc_key, xhttp_key = _rkeys[0], _rkeys[1], _rkeys[2]
-tcp_sid = os.environ["RW_SID_TCP"]; grpc_sid = os.environ["RW_SID_GRPC"]; xhttp_sid = os.environ["RW_SID_XHTTP"]
+# Reality нужен для gRPC и XHTTP (по 1 ключу). TCP+Vision убран — не работает.
+_rkeys = get_reality_keys(2)
+grpc_key = _rkeys[0]
+xhttp_key = _rkeys[1]
+grpc_sid = os.environ["RW_SID_GRPC"]; xhttp_sid = os.environ["RW_SID_XHTTP"]
 xhttp_path = os.environ["RW_XHTTP_PATH"]
 
-T_TCP, T_GRPC, T_XHTTP = f"reality-tcp-{SUFFIX}", f"reality-grpc-{SUFFIX}", f"reality-xhttp-{SUFFIX}"
+T_GRPC, T_XHTTP = f"reality-grpc-{SUFFIX}", f"reality-xhttp-{SUFFIX}"
 T_HY2, T_CDN, T_BRIDGE = f"hysteria2-{SUFFIX}", f"cdn-xhttp-{SUFFIX}", f"bridge-in-{SUFFIX}"
 SNIFF = {"enabled": True, "destOverride": ["http", "tls", "quic"]}
 
-def reality(key, sid):
-    return {"dest": f"{SNI}:443", "show": False, "xver": 0,
-            "shortIds": [sid], "privateKey": key, "serverNames": [SNI]}
+MIN_CLIENT_VER = os.environ.get("RW_MIN_CLIENT_VER", "26.7.28")
 
+def reality(key, sid):
+    # minClientVer — только Reality: отсекает старые xray-клиенты (иначе их
+    # неудачные попытки временно роняют инбаунд). Значение = ядро ноды.
+    r = {"dest": f"{SNI}:443", "show": False, "xver": 0,
+         "shortIds": [sid], "privateKey": key, "serverNames": [SNI]}
+    if MIN_CLIENT_VER:
+        r["minClientVer"] = MIN_CLIENT_VER
+    return r
+
+# Рабочий набор (проверено вживую на клиенте Happ): gRPC, Hysteria2,
+# Reality-XHTTP, + CDN-XHTTP через Yandex. Reality-TCP+Vision убран целиком —
+# не поднимается ни в одном клиенте.
 inbounds = [
-    {"tag": T_TCP, "port": P_TCP, "listen": "0.0.0.0", "protocol": "vless",
-     "settings": {"clients": [], "decryption": "none"}, "sniffing": SNIFF,
-     "streamSettings": {"network": "tcp", "security": "reality",
-                        "realitySettings": reality(tcp_key, tcp_sid)}},
+    # gRPC + Reality — проверено, работает везде
     {"tag": T_GRPC, "port": P_GRPC, "listen": "::", "protocol": "vless",
      "settings": {"clients": [], "decryption": "none"},
      "sniffing": {"enabled": True, "destOverride": ["http", "tls"]},
      "streamSettings": {"network": "grpc", "security": "reality",
                         "grpcSettings": {"serviceName": "grpc"},
                         "realitySettings": reality(grpc_key, grpc_sid)}},
-    {"tag": T_XHTTP, "port": P_XHTTP, "listen": "0.0.0.0", "protocol": "vless",
-     "settings": {"clients": [], "decryption": "none"}, "sniffing": SNIFF,
-     "streamSettings": {"network": "xhttp", "security": "reality",
-                        "realitySettings": reality(xhttp_key, xhttp_sid),
-                        "xhttpSettings": {"path": xhttp_path, "mode": "auto", "xPaddingBytes": "100-1000"}}},
+    # Hysteria2 — из покупного (серт файлом, alpn h3); нужен UDP-порт открыт
     {"tag": T_HY2, "port": P_HY2, "listen": "::", "protocol": "hysteria",
      "settings": {"clients": [], "version": 2}, "sniffing": SNIFF,
      "streamSettings": {"network": "hysteria", "security": "tls",
                         "tlsSettings": {"alpn": ["h3"],
                             "certificates": [{"certificateFile": "/etc/nginx/ssl/cdn.crt",
                                               "keyFile": "/etc/nginx/ssl/cdn.key"}]}}},
+    # Reality + XHTTP (прямой) — работает на свежих клиентах (Happ и т.п.)
+    {"tag": T_XHTTP, "port": P_XHTTP, "listen": "0.0.0.0", "protocol": "vless",
+     "settings": {"clients": [], "decryption": "none"}, "sniffing": SNIFF,
+     "streamSettings": {"network": "xhttp", "security": "reality",
+                        "realitySettings": reality(xhttp_key, xhttp_sid),
+                        "xhttpSettings": {"path": xhttp_path, "mode": "auto", "xPaddingBytes": "100-1000"}}},
 ]
+# CDN-XHTTP через Yandex — из покупного (главный инбаунд под обход DPI)
 if ENABLE_CDN:
     inbounds.append(
         {"tag": T_CDN, "port": P_CDN, "listen": "127.0.0.1", "protocol": "vless",
@@ -582,7 +605,7 @@ PROFILE_UUID = prof["uuid"]
 tag_uuid = {ib["tag"]: ib["uuid"] for ib in prof["inbounds"]}
 elog(f"      Профиль: {PROFILE_UUID}")
 
-active_tags = [T_TCP, T_GRPC, T_XHTTP, T_HY2]
+active_tags = [T_GRPC, T_XHTTP, T_HY2]
 if ENABLE_CDN: active_tags.append(T_CDN)
 if ENABLE_BRIDGE: active_tags.append(T_BRIDGE)
 active_uuids = [tag_uuid[t] for t in active_tags]
@@ -666,8 +689,6 @@ def mkhost(tag, payload):
         return
     created[tag] = r["response"]["uuid"]; elog(f"      {tag} -> {r['response']['uuid']}")
 
-mkhost(T_TCP, {"remark": remark("Reality TCP"), "address": NODE_DOMAIN, "port": P_TCP,
-    "sni": SNI, "fingerprint": "chrome", "securityLayer": "DEFAULT"})
 mkhost(T_GRPC, {"remark": remark("Reality gRPC"), "address": NODE_DOMAIN, "port": P_GRPC,
     "sni": SNI, "path": "grpc", "alpn": "h2", "fingerprint": "chrome", "securityLayer": "DEFAULT"})
 mkhost(T_XHTTP, {"remark": remark("Reality XHTTP"), "address": NODE_DOMAIN, "port": P_XHTTP,
@@ -754,12 +775,13 @@ env RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN" \
   RW_NODE_NAME="$NODE_NAME" RW_NODE_DOMAIN="$NODE_DOMAIN" RW_NODE_ADDRESS="$NODE_ADDRESS" \
   RW_NODE_PORT="$NODE_PORT" RW_HOST_PREFIX="$HOST_PREFIX" RW_TAG_SUFFIX="$TAG_SUFFIX" \
   RW_SNI_DONOR="$SNI_DONOR" RW_ENABLE_CDN="$ENABLE_CDN" RW_ENABLE_BRIDGE="$ENABLE_BRIDGE" \
+  RW_MIN_CLIENT_VER="$MIN_CLIENT_VER" \
   RW_SQUAD_MODE="$SQUAD_MODE" RW_SQUAD_UUIDS="$SQUAD_UUIDS" RW_NEW_SQUAD_NAME="$NEW_SQUAD_NAME" \
   RW_CDN_PUBLIC_DOMAIN="$CDN_PUBLIC_DOMAIN" RW_CDN_PATH="$CDN_PATH" \
-  RW_PORT_REALITY_TCP="$PORT_REALITY_TCP" RW_PORT_REALITY_GRPC="$PORT_REALITY_GRPC" \
+  RW_PORT_REALITY_GRPC="$PORT_REALITY_GRPC" \
   RW_PORT_REALITY_XHTTP="$PORT_REALITY_XHTTP" RW_PORT_HY2="$PORT_HY2" \
   RW_PORT_CDN_LOCAL="$PORT_CDN_LOCAL" RW_PORT_BRIDGE="$PORT_BRIDGE" \
-  RW_SID_TCP="$(openssl rand -hex 8)" RW_SID_GRPC="$(openssl rand -hex 8)" \
+  RW_SID_GRPC="$(openssl rand -hex 8)" \
   RW_SID_XHTTP="$(openssl rand -hex 8)" RW_XHTTP_PATH="/$(openssl rand -hex 8)/" \
   python3 /tmp/rw_deploy.py || die "Провижининг в панели не прошёл (см. ошибку выше)."
 
@@ -891,7 +913,7 @@ log "Nginx готов: https://$NODE_DOMAIN отдаёт заглушку."
 # ---------------------------------------------------------------------------
 # Firewall — политика drop совместима (правила в существующую inet filter input)
 # ---------------------------------------------------------------------------
-FW_TCP="$PORT_REALITY_TCP, $PORT_REALITY_GRPC, $PORT_REALITY_XHTTP, 80, 443, 8443"
+FW_TCP="$PORT_REALITY_GRPC, $PORT_REALITY_XHTTP, 80, 443, 8443"
 BRIDGE_RULES=""
 if [[ "$ENABLE_BRIDGE" == "true" ]]; then
   if [[ -n "$BRIDGE_PEERS" ]]; then
@@ -941,7 +963,7 @@ EOF
   systemctl enable rw-node-firewall.service >/dev/null 2>&1 || true
 elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   log "Открываю порты в ufw..."
-  for p in $PORT_REALITY_TCP $PORT_REALITY_GRPC $PORT_REALITY_XHTTP 80 443 8443; do ufw allow "$p"/tcp >/dev/null 2>&1 || true; done
+  for p in $PORT_REALITY_GRPC $PORT_REALITY_XHTTP 80 443 8443; do ufw allow "$p"/tcp >/dev/null 2>&1 || true; done
   ufw allow "$PORT_HY2"/udp >/dev/null 2>&1 || true
   if [[ -n "$PANEL_IP" ]]; then ufw allow from "$PANEL_IP" to any port "$NODE_PORT" proto tcp >/dev/null 2>&1 || true
   else ufw allow "$NODE_PORT"/tcp >/dev/null 2>&1 || true; fi
@@ -981,10 +1003,9 @@ echo "Профиль: $PROFILE_UUID"
 echo "SNI-донор Reality: $SNI_DONOR"
 echo ""
 echo "Инбаунды:"
-echo "  Reality TCP (Vision)  TCP  $PORT_REALITY_TCP"
 echo "  Reality gRPC          TCP  $PORT_REALITY_GRPC"
-echo "  Reality XHTTP         TCP  $PORT_REALITY_XHTTP  (не проверен вживую — бонусный)"
-echo "  Hysteria2             UDP  $PORT_HY2"
+echo "  Reality XHTTP         TCP  $PORT_REALITY_XHTTP  (нужен свежий клиент, напр. Happ)"
+echo "  Hysteria2             UDP  $PORT_HY2  (проверь, что UDP $PORT_HY2 открыт у провайдера)"
 [[ "$ENABLE_CDN" == "true" ]] && echo "  CDN XHTTP             Yandex CDN -> Nginx -> 127.0.0.1:$PORT_CDN_LOCAL"
 [[ "$ENABLE_BRIDGE" == "true" ]] && echo "  BRIDGE_IN             TCP  $PORT_BRIDGE  (межнодовый; в подписку не идёт)"
 echo ""
