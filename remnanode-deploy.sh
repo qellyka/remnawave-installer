@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
-# Remnawave — установка ноды с НУЛЯ на чистом сервере: Docker, сама нода,
-# 6 инбаундов (вкл. BRIDGE_IN), хосты, Nginx с сайтом-заглушкой — by qellyka
+# Remnawave — установка ноды с НУЛЯ на чистом сервере — by qellyka
 #
-# Заходишь на чистый Ubuntu/Debian, запускаешь — скрипт делает ВСЁ сам:
+# Заходишь на чистый Ubuntu/Debian, запускаешь — скрипт делает всё сам:
 #   - ставит Docker + Compose, если их нет;
-#   - логинится в панель (логин/пароль админа) и сам выпускает API-токен;
-#   - выпускает сертификат, ставит Nginx + заглушку;
-#   - создаёт в панели профиль с 6 инбаундами и САМУ НОДУ (через API),
-#     забирает у панели SECRET_KEY;
-#   - разворачивает контейнер remnanode с этим ключом и свежим Xray;
-#   - создаёт хосты, добавляет инбаунды в сквады;
+#   - авторизуется в панели API-токеном (или пробует выпустить его из логина);
+#   - выпускает сертификат, ставит Nginx + сайт-заглушку;
+#   - создаёт в панели профиль (Reality gRPC, Reality XHTTP, Hysteria2,
+#     опционально CDN-XHTTP через Yandex CDN и BRIDGE_IN) и саму ноду;
+#   - разворачивает контейнер remnanode и ждёт, пока панель его увидит;
+#   - создаёт хосты с именами вида "🇩🇪 DE | Reality gRPC", добавляет
+#     инбаунды в сквады;
 #   - открывает порты (NODE_PORT — только для IP панели);
 #   - ставит хук продления сертификата.
 #
-# Авторизация в v3 (важно и подтверждено спекой панели):
-#   Панель на /api/* НЕ принимает админский JWT напрямую (403 "must create
-#   own API-token"). Единственный рабочий путь: логин -> выпустить API-токен
-#   (`POST /api/api-tokens` разрешён ТОЛЬКО админским JWT) -> дальше всё
-#   делать токеном. Пароль спрашивается один раз, на диск не пишется.
-#   На диск (chmod 600) кладётся только выпущенный API-токен.
+# Авторизация в v3: данные (/api/nodes, /api/hosts, ...) принимают ТОЛЬКО
+# API-токен (Settings -> API Tokens). Админский JWT из логина там даёт 403.
+# Токен кладётся в /root/.rw_node_token (chmod 600) для повторных прогонов.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -28,6 +25,14 @@ die()  { echo -e "\033[1;31m[ERROR]\033[0m $1"; exit 1; }
 hr()   { echo "---------------------------------------------------"; }
 
 [[ $EUID -eq 0 ]] || die "Запускай от root (sudo)."
+
+# Все временные файлы (в т.ч. с токеном и SECRET_KEY) — в приватной папке,
+# которая удаляется при любом выходе.
+umask 022
+WORK_DIR="$(mktemp -d /tmp/rw-deploy.XXXXXX)"
+chmod 700 "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT
+TOKEN_FILE="/root/.rw_node_token"
 
 DECOY_SITE_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/index.html"
 NODE_DIR="/opt/remnanode"
@@ -61,7 +66,7 @@ read_clean() {  # $1 prompt, $2 varname, $3 charset — чистит артеф�
 }
 
 echo "==================================================="
-echo "  Remnawave — установка ноды с НУЛЯ (6 инбаундов)"
+echo "  Remnawave — установка ноды с НУЛЯ"
 echo "  by qellyka"
 echo "==================================================="
 echo "Чистый сервер -> готовая нода. Нужна только A-запись на домен ноды."
@@ -75,12 +80,21 @@ read_clean "URL панели (panel.example.com или https://panel.example.com
 PANEL_URL="${PANEL_URL%/}"
 
 echo ""
+AUTH_CHOICE=""
+API_TOKEN=""; RW_LOGIN=""; RW_PASSWORD=""
+if [[ -s "$TOKEN_FILE" ]]; then
+  read -rp "Нашёл сохранённый API-токен ($TOKEN_FILE). Использовать его? [Y/n]: " USE_SAVED
+  if [[ ! "$USE_SAVED" =~ ^[Nn]$ ]]; then
+    API_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+    AUTH_CHOICE="saved"
+  fi
+fi
+if [[ -z "$AUTH_CHOICE" ]]; then
 echo "Авторизация в панели:"
 echo "  1) Готовый API-токен — СОЗДАЙ его в UI: Settings -> API Tokens (рекомендуется)"
 echo "  2) Логин + пароль (скрипт попробует выпустить токен сам — многие панели"
 echo "     это ЗАПРЕЩАЮТ и вернут 403 'must create own API-token')"
 read -rp "Введите номер [1-2]: " AUTH_CHOICE
-API_TOKEN=""; RW_LOGIN=""; RW_PASSWORD=""
 if [[ "$AUTH_CHOICE" == "2" ]]; then
   read -rp "Логин администратора панели: " RW_LOGIN
   read -rsp "Пароль администратора: " RW_PASSWORD; echo
@@ -89,6 +103,7 @@ else
   read -rp "API-токен: " API_TOKEN
   API_TOKEN="$(echo "$API_TOKEN" | tr -d '[:space:]')"
   [[ -n "$API_TOKEN" ]] || die "Токен пуст"
+fi
 fi
 
 read_clean "Имя ноды в панели (например DE-1): " NODE_NAME 'A-Za-z0-9 _.-'
@@ -100,7 +115,7 @@ read_clean "Домен ноды (например de1.example.com): " NODE_DOMAI
 [[ -n "$NODE_DOMAIN" ]] || die "Домен обязателен"
 
 hr
-echo "Публичный домен CDN (Yandex CDN) — Enter, чтобы пропустить (тогда 5 инбаундов)."
+echo "Публичный домен CDN (Yandex CDN) — Enter, чтобы пропустить (без CDN-инбаунда)."
 read_clean "Публичный домен CDN (например cdn.example.com): " CDN_PUBLIC_DOMAIN 'A-Za-z0-9.-'
 ENABLE_CDN=false; [[ -n "$CDN_PUBLIC_DOMAIN" ]] && ENABLE_CDN=true
 
@@ -120,8 +135,21 @@ if [[ "$BRIDGE_ANS" =~ ^[Yy]$ ]]; then
 fi
 
 hr
-echo "Префикс к именам хостов — необязательно (например флаг страны)."
-read -rp "Префикс (Enter — пропустить): " HOST_PREFIX
+echo "Код страны ноды (2 буквы, например DE, PL, FI) — из него соберу имена"
+echo "хостов вида \"🇩🇪 DE | Reality gRPC\". Такой формат подхватывает шаблон"
+echo "автовыбора (remarkRegex ^\\S+\\s+[A-Z]{2}\\s*\\|)."
+read_clean "Код страны (Enter — без префикса): " COUNTRY_CODE 'A-Za-z'
+COUNTRY_CODE="$(echo "$COUNTRY_CODE" | tr '[:lower:]' '[:upper:]' | cut -c1-2)"
+HOST_PREFIX=""
+if [[ ${#COUNTRY_CODE} -eq 2 ]]; then
+  FLAG="$(python3 -c "import sys;print(''.join(chr(0x1F1E6+ord(c)-65) for c in sys.argv[1]))" "$COUNTRY_CODE" 2>/dev/null || true)"
+  HOST_PREFIX="${FLAG:+$FLAG }$COUNTRY_CODE |"
+  log "Префикс хостов: \"$HOST_PREFIX\""
+else
+  read -rp "Свой префикс к именам хостов (Enter — без префикса): " HOST_PREFIX
+fi
+read -rp "Имя CDN-хоста [LTE]: " CDN_HOST_NAME
+CDN_HOST_NAME="${CDN_HOST_NAME:-LTE}"
 
 # IP панели (для правила файрвола на NODE_PORT) — резолвим хост панели.
 PANEL_HOST="$(echo "$PANEL_URL" | sed -E 's#^https?://##; s#/.*$##; s#:.*$##')"
@@ -168,15 +196,39 @@ else
   log "DNS в порядке: $NODE_DOMAIN -> $RESOLVED"
 fi
 PANEL_IP=$(dig +short "$PANEL_HOST" A | tail -n1 || true)
-[[ -n "$PANEL_IP" ]] && log "IP панели ($PANEL_HOST): $PANEL_IP — открою NODE_PORT только ему."
+# Если панель за Cloudflare/CDN, DNS отдаёт IP прокси, а не сервера панели —
+# тогда правило на NODE_PORT заблокирует саму панель. Даём поправить.
+echo "IP сервера ПАНЕЛИ (с него панель ходит на NODE_PORT $NODE_PORT)."
+echo "Если панель за Cloudflare/CDN — DNS покажет не тот IP, впиши реальный."
+read -rp "IP панели [${PANEL_IP:-не определён}] (Enter — принять, 'any' — открыть всем): " _pip
+_pip="$(echo "$_pip" | tr -d '[:space:]')"
+if [[ "$_pip" == "any" ]]; then PANEL_IP=""
+elif [[ -n "$_pip" ]]; then PANEL_IP="$_pip"; fi
+if [[ -n "$PANEL_IP" ]]; then
+  log "NODE_PORT $NODE_PORT будет открыт только для $PANEL_IP."
+else
+  warn "NODE_PORT $NODE_PORT будет открыт ВСЕМ — ограничь его позже."
+fi
 
 # Версия xray в образе ноды -> minClientVer (отсекает старые Reality-клиенты).
+# Можно задать руками: MIN_CLIENT_VER=26.7.28 bash remnanode-deploy.sh
+# (MIN_CLIENT_VER=none — не ограничивать).
+log "Скачиваю образ ноды..."
+docker pull "$NODE_IMAGE" >/dev/null 2>&1 || warn "docker pull не прошёл — попробую с тем, что есть."
+if [[ -n "${MIN_CLIENT_VER:-}" ]]; then
+  [[ "$MIN_CLIENT_VER" == "none" ]] && MIN_CLIENT_VER=""
+  log "minClientVer задан вручную: ${MIN_CLIENT_VER:-без ограничения}"
+  _ver="manual"
+else
 MIN_CLIENT_VER="26.7.28"   # фолбэк, если не удалось определить
 log "Определяю версию Xray в образе ноды (для minClientVer)..."
-docker pull "$NODE_IMAGE" >/dev/null 2>&1 || true
+# || true обязателен: при set -o pipefail пустой grep иначе молча роняет скрипт.
 _ver=$(docker run --rm --entrypoint /usr/local/bin/xray "$NODE_IMAGE" version 2>/dev/null \
-  | grep -oE 'Xray [0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk '{print $2}')
-if [[ "$_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  | grep -oE 'Xray [0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk '{print $2}' || true)
+fi
+if [[ "$_ver" == "manual" ]]; then
+  :
+elif [[ "$_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   MIN_CLIENT_VER="$_ver"; log "minClientVer = $MIN_CLIENT_VER (ядро ноды)."
 else
   warn "Не определил версию Xray — беру minClientVer=$MIN_CLIENT_VER по умолчанию."
@@ -186,7 +238,7 @@ fi
 # Авторизация
 # ---------------------------------------------------------------------------
 if [[ "$AUTH_CHOICE" == "2" ]]; then
-  cat > /tmp/rw_mint_token.py <<'MINTEOF'
+  cat > "$WORK_DIR/mint.py" <<'MINTEOF'
 import json, os, sys, urllib.request, urllib.error
 PANEL = os.environ["RW_PANEL_URL"].rstrip("/")
 
@@ -244,15 +296,15 @@ sys.exit(2)
 MINTEOF
   log "Логинюсь и выпускаю API-токен..."
   API_TOKEN=$(RW_PANEL_URL="$PANEL_URL" RW_LOGIN="$RW_LOGIN" RW_PASSWORD="$RW_PASSWORD" \
-    python3 /tmp/rw_mint_token.py) \
+    python3 "$WORK_DIR/mint.py") \
     || die "Не удалось выпустить токен. Создай его в UI (Settings -> API Tokens) и запусти заново с вариантом 1."
   unset RW_PASSWORD
-  rm -f /tmp/rw_mint_token.py
+  rm -f "$WORK_DIR/mint.py"
   log "API-токен получен."
 fi
 
 # Проверяем токен (обе ветки): реальный вызов к /api/*.
-cat > /tmp/rw_check_token.py <<'CHKEOF'
+cat > "$WORK_DIR/check.py" <<'CHKEOF'
 import json, os, sys, urllib.request, urllib.error
 PANEL = os.environ["RW_PANEL_URL"].rstrip("/"); TOK = os.environ["RW_API_TOKEN"]
 req = urllib.request.Request(PANEL + "/api/hosts", method="GET")
@@ -271,19 +323,19 @@ except Exception as e:
     print(f"[ERROR] {e}", file=sys.stderr); sys.exit(1)
 CHKEOF
 log "Проверяю токен..."
-RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN" python3 /tmp/rw_check_token.py \
-  || die "Токен не работает (см. выше)."
-rm -f /tmp/rw_check_token.py
+export RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN"
+python3 "$WORK_DIR/check.py" \
+  || die "Токен не работает (см. выше). Если это сохранённый токен — удали $TOKEN_FILE и запусти заново."
+rm -f "$WORK_DIR/check.py"
 log "Токен рабочий."
 
 # Сохраним токен для повторных прогонов (chmod 600).
-umask 077; echo "$API_TOKEN" > "$NODE_DIR.token" 2>/dev/null || echo "$API_TOKEN" > /root/.rw_node_token
-umask 022
+( umask 077; printf '%s\n' "$API_TOKEN" > "$TOKEN_FILE" )
 
 # ---------------------------------------------------------------------------
 # Выбор Internal Squad'ов (в какие добавить инбаунды ноды)
 # ---------------------------------------------------------------------------
-cat > /tmp/rw_list_squads.py <<'SQEOF'
+cat > "$WORK_DIR/squads.py" <<'SQEOF'
 import json, os, sys, urllib.request, urllib.error
 PANEL = os.environ["RW_PANEL_URL"].rstrip("/"); TOK = os.environ["RW_API_TOKEN"]
 req = urllib.request.Request(PANEL + "/api/internal-squads", method="GET")
@@ -302,8 +354,8 @@ for s in (squads or []):
 SQEOF
 
 SQUAD_MODE="ALL"; SQUAD_UUIDS=""; NEW_SQUAD_NAME=""
-SQUADS_LIST=$(RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN" python3 /tmp/rw_list_squads.py 2>/dev/null || true)
-rm -f /tmp/rw_list_squads.py
+SQUADS_LIST=$(python3 "$WORK_DIR/squads.py" 2>/dev/null || true)
+rm -f "$WORK_DIR/squads.py"
 hr
 echo "Internal Squads — в какие добавить инбаунды этой ноды?"
 if [[ -n "$SQUADS_LIST" ]]; then
@@ -378,7 +430,7 @@ systemctl reload nginx 2>/dev/null || systemctl restart nginx
 if [[ ! -d "/etc/letsencrypt/live/$NODE_DOMAIN" ]]; then
   log "Выпускаю ECDSA-сертификат Let's Encrypt для $NODE_DOMAIN..."
   certbot certonly --webroot -w /var/www/certbot -d "$NODE_DOMAIN" \
-    --key-type ecdsa --non-interactive --agree-tos -m "admin@$NODE_DOMAIN" --no-eff-email \
+    --key-type ecdsa --non-interactive --agree-tos --register-unsafely-without-email \
     || warn "Certbot не смог получить сертификат"
 else
   log "Сертификат для $NODE_DOMAIN уже есть — пропускаю выпуск."
@@ -390,38 +442,29 @@ cp "/etc/letsencrypt/live/$NODE_DOMAIN/privkey.pem"   "$SSL_DIR/cdn.key"
 chmod 644 "$SSL_DIR/cdn.crt"; chmod 600 "$SSL_DIR/cdn.key"
 
 # ---------------------------------------------------------------------------
-# SNI-донор (RealiTLScanner, fallback google)
+# SNI-донор Reality: проверяем кандидатов openssl'ом (TLS 1.3 + h2 + X25519)
+# и берём самого быстрого. Без скачивания сканера и без сканирования подсетей
+# (RealiTLScanner сам предупреждает, что сканы с VPS могут пометить сервер).
 # ---------------------------------------------------------------------------
-SNI_DONOR="www.google.com"
-SNI_CANDIDATES=("www.google.com" "www.microsoft.com" "www.apple.com" "swift.org")
-log "Проверяю SNI-донора RealiTLScanner..."
-SCANNER_BIN=""
-if RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/XTLS/RealiTLScanner/releases/latest 2>/dev/null); then
-  ASSET=$(echo "$RELEASE_JSON" | python3 -c "
-import json,sys
-try:
-    for a in json.load(sys.stdin).get('assets',[]):
-        n=a['name'].lower()
-        if 'linux' in n and ('amd64' in n or 'x86_64' in n): print(a['browser_download_url']); break
-except Exception: pass")
-  if [[ -n "${ASSET:-}" ]]; then
-    STMP=$(mktemp -d)
-    if curl -fsSL "$ASSET" -o "$STMP/s.tar.gz" 2>/dev/null; then
-      tar -xzf "$STMP/s.tar.gz" -C "$STMP" 2>/dev/null || true
-      SCANNER_BIN=$(find "$STMP" -type f -iname "*realitlscanner*" 2>/dev/null | head -1)
-      [[ -n "$SCANNER_BIN" ]] && chmod +x "$SCANNER_BIN"
-    fi
+SNI_CANDIDATES=("www.google.com" "www.microsoft.com" "www.apple.com" "dl.google.com" "www.amazon.com" "swift.org")
+SNI_DONOR=""; _best_ms=999999
+log "Выбираю SNI-донора Reality..."
+for c in "${SNI_CANDIDATES[@]}"; do
+  _t0=$(date +%s%N)
+  _out=$(timeout 8 openssl s_client -connect "$c:443" -servername "$c" -tls1_3 \
+          -alpn h2 -groups X25519 </dev/null 2>/dev/null || true)
+  _ms=$(( ($(date +%s%N) - _t0) / 1000000 ))
+  if grep -q "TLSv1.3" <<<"$_out" && grep -q "ALPN protocol: h2" <<<"$_out"; then
+    log "  $c — годится (${_ms} мс)"
+    if (( _ms < _best_ms )); then _best_ms=$_ms; SNI_DONOR="$c"; fi
+  else
+    log "  $c — не подходит"
   fi
-fi
-if [[ -n "$SCANNER_BIN" ]]; then
-  for c in "${SNI_CANDIDATES[@]}"; do
-    log "Проверяю $c..."
-    if timeout 12 "$SCANNER_BIN" -addr "$c" -timeout 5 2>&1 | grep -q "feasible=true"; then
-      SNI_DONOR="$c"; log "Подтверждён донор: $c."; break
-    fi
-  done
+done
+if [[ -z "$SNI_DONOR" ]]; then
+  SNI_DONOR="www.google.com"; warn "Ни один кандидат не прошёл проверку — беру $SNI_DONOR."
 else
-  warn "RealiTLScanner не получил — беру донор по умолчанию: $SNI_DONOR"
+  log "SNI-донор: $SNI_DONOR"
 fi
 
 # ---------------------------------------------------------------------------
@@ -437,7 +480,7 @@ mkdir -p "$NODE_DIR"
 # ---------------------------------------------------------------------------
 # Провижининг в панели: профиль (6 инбаундов) + СОЗДАНИЕ ноды + хосты + сквады
 # ---------------------------------------------------------------------------
-cat > /tmp/rw_deploy.py <<'DEPLOYEOF'
+cat > "$WORK_DIR/deploy.py" <<'DEPLOYEOF'
 #!/usr/bin/env python3
 """Создаёт профиль, САМУ НОДУ (через API, забирает SECRET_KEY), хосты,
 добавляет инбаунды в сквады. Печатает SECRET_KEY и UUID для bash. by qellyka"""
@@ -480,6 +523,17 @@ SNI = os.environ.get("RW_SNI_DONOR", "www.google.com")
 SUFFIX = os.environ["RW_TAG_SUFFIX"]
 
 def remark(n): return f"{HOST_PREFIX} {n}" if HOST_PREFIX else n
+
+PROFILE_UUID = None
+def rollback_and_die(msg):
+    # Нода не создалась — убираем свежий профиль, чтобы не копились сироты.
+    if PROFILE_UUID:
+        r = api("DELETE", f"/api/config-profiles/{PROFILE_UUID}", fatal=False)
+        if "__error__" in r:
+            elog(f"  [WARN] не смог удалить профиль {PROFILE_UUID}: {r['__error__']}")
+        else:
+            elog(f"  Откатил: профиль {PROFILE_UUID} удалён.")
+    die(msg)
 
 elog("[1/7] Проверяю токен...")
 r = api("GET", "/api/hosts", fatal=False)
@@ -585,7 +639,8 @@ profile_config = {
     "outbounds": [{"tag": "direct", "protocol": "freedom"},
                   {"tag": "block", "protocol": "blackhole"}],
     "routing": {"rules": [
-        {"ip": ["geoip:private"], "type": "field", "outboundTag": "direct"},
+        # Клиенты НЕ должны ходить в локальную сеть/метадату сервера (169.254.169.254 и т.п.)
+        {"ip": ["geoip:private"], "type": "field", "outboundTag": "block"},
         {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"}]},
 }
 elog(f"[3/7] Создаю Config Profile '{PROFILE_NAME}' ({len(inbounds)} инбаундов)...")
@@ -637,12 +692,12 @@ for attempt in range(3):
         elog(f"      имя ноды занято, пробую '{NODE_NAME}'...")
         continue
     if "409" in err or "already exists" in low:
-        die("Нода с таким адресом уже есть в панели (возможно, твоя рабочая/покупная нода "
+        rollback_and_die("Нода с таким адресом уже есть в панели (возможно, твоя рабочая/покупная нода "
             f"на {NODE_ADDRESS}). Скрипт НЕ трогает её, чтобы не сломать. Удали тестовую "
             "ноду в панели или ставь на другой сервер/адрес. Ответ: " + err)
-    die(f"Создание ноды не прошло: {err}")
+    rollback_and_die(f"Создание ноды не прошло: {err}")
 if node is None:
-    die("Не смог создать ноду (имя постоянно занято).")
+    rollback_and_die("Не смог создать ноду (имя постоянно занято).")
 NODE_UUID = node.get("uuid") or node.get("nodeUuid")
 if not NODE_UUID:
     die(f"Нода создана, но не вернулся uuid: {json.dumps(node)[:300]}")
@@ -696,7 +751,7 @@ mkhost(T_XHTTP, {"remark": remark("Reality XHTTP"), "address": NODE_DOMAIN, "por
 mkhost(T_HY2, {"remark": remark("Hysteria2"), "address": NODE_DOMAIN, "port": P_HY2,
     "sni": NODE_DOMAIN, "alpn": "h3", "fingerprint": "random", "securityLayer": "TLS"})
 if ENABLE_CDN:
-    mkhost(T_CDN, {"remark": remark(f"CDN {CDN_PUBLIC}"), "address": CDN_PUBLIC, "port": 443,
+    mkhost(T_CDN, {"remark": remark(os.environ.get("RW_CDN_HOST_NAME") or "LTE"), "address": CDN_PUBLIC, "port": 443,
         "sni": CDN_PUBLIC, "host": CDN_PUBLIC, "path": CDN_PATH, "alpn": "h3,h2,http/1.1",
         "fingerprint": "random", "securityLayer": "TLS",
         "xhttpExtraParams": {"mode": "packet-up", "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache",
@@ -763,7 +818,7 @@ else:
 elog("[7/7] Готово (панель).")
 # stdout — только машиночитаемое для bash:
 out = {"nodeUuid": NODE_UUID, "profileUuid": PROFILE_UUID, "secretKey": SECRET_KEY or ""}
-json.dump(out, open("/tmp/rw_deploy_result.json", "w"))
+json.dump(out, open(os.environ["RW_RESULT_FILE"], "w"))
 print(json.dumps(out))
 DEPLOYEOF
 
@@ -771,7 +826,7 @@ TAG_SUFFIX="$(echo "$NODE_DOMAIN" | tr -cd 'A-Za-z0-9' | cut -c1-12)-$(openssl r
 NODE_ADDRESS="${PUBLIC_IP:-$NODE_DOMAIN}"
 
 log "Создаю профиль, ноду и хосты в панели..."
-env RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN" \
+env RW_RESULT_FILE="$WORK_DIR/result.json" RW_CDN_HOST_NAME="$CDN_HOST_NAME" \
   RW_NODE_NAME="$NODE_NAME" RW_NODE_DOMAIN="$NODE_DOMAIN" RW_NODE_ADDRESS="$NODE_ADDRESS" \
   RW_NODE_PORT="$NODE_PORT" RW_HOST_PREFIX="$HOST_PREFIX" RW_TAG_SUFFIX="$TAG_SUFFIX" \
   RW_SNI_DONOR="$SNI_DONOR" RW_ENABLE_CDN="$ENABLE_CDN" RW_ENABLE_BRIDGE="$ENABLE_BRIDGE" \
@@ -783,11 +838,11 @@ env RW_PANEL_URL="$PANEL_URL" RW_API_TOKEN="$API_TOKEN" \
   RW_PORT_CDN_LOCAL="$PORT_CDN_LOCAL" RW_PORT_BRIDGE="$PORT_BRIDGE" \
   RW_SID_GRPC="$(openssl rand -hex 8)" \
   RW_SID_XHTTP="$(openssl rand -hex 8)" RW_XHTTP_PATH="/$(openssl rand -hex 8)/" \
-  python3 /tmp/rw_deploy.py || die "Провижининг в панели не прошёл (см. ошибку выше)."
+  python3 "$WORK_DIR/deploy.py" || die "Провижининг в панели не прошёл (см. ошибку выше)."
 
-NODE_UUID=$(python3 -c "import json;print(json.load(open('/tmp/rw_deploy_result.json'))['nodeUuid'])")
-PROFILE_UUID=$(python3 -c "import json;print(json.load(open('/tmp/rw_deploy_result.json'))['profileUuid'])")
-SECRET_KEY=$(python3 -c "import json;print(json.load(open('/tmp/rw_deploy_result.json'))['secretKey'])")
+NODE_UUID=$(python3 -c "import json;print(json.load(open('$WORK_DIR/result.json'))['nodeUuid'])")
+PROFILE_UUID=$(python3 -c "import json;print(json.load(open('$WORK_DIR/result.json'))['profileUuid'])")
+SECRET_KEY=$(python3 -c "import json;print(json.load(open('$WORK_DIR/result.json'))['secretKey'])")
 
 # SECRET_KEY (общий ключ панели из /api/keygen) мог не прийти — попросим из UI.
 if [[ -z "$SECRET_KEY" ]]; then
@@ -798,7 +853,6 @@ if [[ -z "$SECRET_KEY" ]]; then
   SECRET_KEY="$(echo "$SECRET_KEY" | tr -d '[:space:]\"')"
   [[ -n "$SECRET_KEY" ]] || die "Без SECRET_KEY нода не подключится."
 fi
-rm -f /tmp/rw_deploy.py
 
 # ---------------------------------------------------------------------------
 # docker-compose.yml ноды + запуск
@@ -829,6 +883,13 @@ EOF
 # Боевой Nginx (заглушка + камуфляж 8443 + origin CDN)
 # ---------------------------------------------------------------------------
 log "Пишу боевой конфиг Nginx..."
+# nginx >= 1.25.1: "listen ... http2" устарел, нужен "http2 on;".
+NGX_VER=$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+if [[ -n "$NGX_VER" ]] && [[ "$(printf '%s\n1.25.1\n' "$NGX_VER" | sort -V | head -1)" == "1.25.1" ]]; then
+  NGX_H2_LISTEN=""; NGX_H2_DIRECTIVE="    http2 on;"
+else
+  NGX_H2_LISTEN=" http2"; NGX_H2_DIRECTIVE=""
+fi
 cat > /etc/nginx/conf.d/hy2-ping.conf <<EOF
 server {
     listen 8443 ssl;
@@ -848,8 +909,9 @@ EOF
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
-    listen 443 ssl http2 default_server;
-    listen [::]:443 ssl http2 default_server;
+    listen 443 ssl${NGX_H2_LISTEN} default_server;
+    listen [::]:443 ssl${NGX_H2_LISTEN} default_server;
+${NGX_H2_DIRECTIVE}
     server_name _;
 
     ssl_certificate     $SSL_DIR/cdn.crt;
@@ -939,7 +1001,10 @@ if command -v nft >/dev/null 2>&1 && nft list table inet filter >/dev/null 2>&1;
 #!/usr/bin/env bash
 set -u
 nft list table inet filter >/dev/null 2>&1 || exit 0
-nft list chain inet filter input 2>/dev/null | grep -q "rw-node" && exit 0
+# Повторный прогон: удаляем старые правила rw-node*, чтобы порты/IP обновились.
+for h in \$(nft -a list chain inet filter input 2>/dev/null | grep 'comment "rw-node' | grep -oE 'handle [0-9]+' | awk '{print \$2}'); do
+  nft delete rule inet filter input handle "\$h" 2>/dev/null || true
+done
 nft insert rule inet filter input udp dport $PORT_HY2 accept comment "rw-node"
 nft insert rule inet filter input tcp dport { $FW_TCP } accept comment "rw-node"
 $NODEPORT_RULE
@@ -991,6 +1056,38 @@ EOF
 chmod +x /etc/letsencrypt/renewal-hooks/deploy/rw-hy2-cert.sh
 
 # ---------------------------------------------------------------------------
+# Ждём, пока панель увидит ноду (после того как открыли фаервол)
+# ---------------------------------------------------------------------------
+log "Жду подключения ноды к панели (до 90 с)..."
+cat > "$WORK_DIR/wait.py" <<'WAITEOF'
+import json, os, sys, time, urllib.request
+PANEL = os.environ["RW_PANEL_URL"].rstrip("/"); TOK = os.environ["RW_API_TOKEN"]
+UUID = sys.argv[1]
+deadline = time.time() + 90
+last = ""
+while time.time() < deadline:
+    try:
+        req = urllib.request.Request(f"{PANEL}/api/nodes/{UUID}")
+        req.add_header("Authorization", "Bearer " + TOK)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            n = json.loads(r.read().decode()).get("response", {})
+        if n.get("isConnected"):
+            print("online"); sys.exit(0)
+        last = n.get("lastStatusMessage") or ""
+    except Exception as e:
+        last = str(e)
+    time.sleep(5)
+print(last or "timeout"); sys.exit(1)
+WAITEOF
+if NODE_STATUS=$(python3 "$WORK_DIR/wait.py" "$NODE_UUID" 2>/dev/null); then
+  NODE_ONLINE=true; log "Нода подключена к панели."
+else
+  NODE_ONLINE=false
+  warn "Панель пока не видит ноду: ${NODE_STATUS:-нет ответа}"
+  warn "Проверь: docker logs remnanode --tail 50, NODE_PORT $NODE_PORT открыт для ${PANEL_IP:-панели}, SECRET_KEY верный."
+fi
+
+# ---------------------------------------------------------------------------
 # Итог
 # ---------------------------------------------------------------------------
 echo ""
@@ -1001,6 +1098,7 @@ echo "Нода:    $NODE_NAME ($NODE_UUID)"
 echo "Домен:   https://$NODE_DOMAIN  (заглушка)"
 echo "Профиль: $PROFILE_UUID"
 echo "SNI-донор Reality: $SNI_DONOR"
+[[ -n "$HOST_PREFIX" ]] && echo "Хосты:   \"$HOST_PREFIX ...\" (подходят под шаблон автовыбора)"
 echo ""
 echo "Инбаунды:"
 echo "  Reality gRPC          TCP  $PORT_REALITY_GRPC"
@@ -1009,7 +1107,11 @@ echo "  Hysteria2             UDP  $PORT_HY2  (проверь, что UDP $PORT_
 [[ "$ENABLE_CDN" == "true" ]] && echo "  CDN XHTTP             Yandex CDN -> Nginx -> 127.0.0.1:$PORT_CDN_LOCAL"
 [[ "$ENABLE_BRIDGE" == "true" ]] && echo "  BRIDGE_IN             TCP  $PORT_BRIDGE  (межнодовый; в подписку не идёт)"
 echo ""
-echo "Проверь: docker logs remnanode --tail 50   и статус ноды в панели (connected)."
+if [[ "$NODE_ONLINE" == "true" ]]; then
+  echo "Статус:  нода ONLINE в панели"
+else
+  echo "Статус:  панель пока не видит ноду — docker logs remnanode --tail 50"
+fi
 if [[ "$ENABLE_BRIDGE" == "true" ]]; then
 hr
 echo "BRIDGE_IN включён. Чтобы мост заработал, на НОДЕ-ИСТОЧНИКЕ нужен"
