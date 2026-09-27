@@ -121,7 +121,15 @@ banner() {
 umask 022
 WORK_DIR="$(mktemp -d /tmp/rw-deploy.XXXXXX)"
 chmod 700 "$WORK_DIR"
-trap 'printf "\033[?25h"; rm -rf "$WORK_DIR"' EXIT
+APT_TIMERS_STOPPED=""
+on_exit() {
+  printf "\033[?25h"
+  rm -rf "$WORK_DIR"
+  # Возвращаем фоновые обновления, которые притормозили на время установки.
+  [[ -n "$APT_TIMERS_STOPPED" ]] && systemctl start $APT_TIMERS_STOPPED >/dev/null 2>&1
+  return 0
+}
+trap on_exit EXIT
 trap 'kill $(jobs -p) 2>/dev/null; printf "\033[?25h\n"; exit 130' INT
 : > "$LOG_FILE" 2>/dev/null || LOG_FILE="$WORK_DIR/deploy.log"
 TOKEN_FILE="/root/.rw_node_token"
@@ -163,6 +171,24 @@ wait_for_apt_lock() {
   done
   [[ $waited -gt 0 ]] && log "Дождался освобождения apt/dpkg (${waited}s)."
   return 0
+}
+
+# apt_run "сообщение" команда... — ждёт свободный apt и повторяет до 4 раз,
+# если между проверкой и запуском блокировку успел перехватить фоновый apt.
+apt_run() {
+  local msg="$1"; shift
+  local try
+  for try in 1 2 3 4; do
+    wait_for_apt_lock
+    spin "$msg" "$@" && return 0
+    if tail -n 15 "$LOG_FILE" | grep -qiE 'could not get lock|unable to acquire the dpkg|dpkg was interrupted'; then
+      tail -n 15 "$LOG_FILE" | grep -qi 'dpkg was interrupted' && dpkg --configure -a >> "$LOG_FILE" 2>&1
+      warn "apt перехватил фоновый процесс — повтор $try/4 через 10 с..."
+      sleep 10; continue
+    fi
+    return 1
+  done
+  return 1
 }
 
 is_ip() {  # IPv4 или IPv6 (грубая, но достаточная проверка)
@@ -375,15 +401,21 @@ step "Зависимости и Docker"
 # ---------------------------------------------------------------------------
 # Зависимости + Docker
 # ---------------------------------------------------------------------------
-wait_for_apt_lock
-spin "Обновляю списки пакетов" apt-get update -q || true
-wait_for_apt_lock
-spin "Ставлю зависимости (nginx, certbot, python3...)" \
+# На свежем сервере apt-daily/unattended-upgrades стартуют по таймеру и
+# перехватывают блокировку apt посреди установки. Тормозим таймеры на время
+# работы скрипта (on_exit включит их обратно); уже запущенное — дожидаемся.
+for t in apt-daily.timer apt-daily-upgrade.timer; do
+  if systemctl is-active --quiet "$t" 2>/dev/null; then
+    systemctl stop "$t" >/dev/null 2>&1 && APT_TIMERS_STOPPED="$APT_TIMERS_STOPPED $t"
+  fi
+done
+apt_run "Обновляю списки пакетов" apt-get update -q || true
+apt_run "Ставлю зависимости (nginx, certbot, python3...)" \
   apt-get install -y -q curl python3 openssl dnsutils nginx certbot ca-certificates unzip tar nftables iproute2 \
   || die "apt-get не смог поставить зависимости"
 
 if ! command -v docker >/dev/null 2>&1; then
-  spin "Ставлю Docker (get.docker.com)" bash -c 'curl -fsSL https://get.docker.com | sh' \
+  apt_run "Ставлю Docker (get.docker.com)" bash -c 'curl -fsSL https://get.docker.com | sh' \
     || die "Не удалось поставить Docker"
   systemctl enable --now docker >/dev/null 2>&1 || true
 else
@@ -392,8 +424,7 @@ fi
 # Compose v2 (плагин). Если нет — ставим.
 if ! docker compose version >/dev/null 2>&1; then
   warn "docker compose (v2) не найден — ставлю плагин..."
-  wait_for_apt_lock
-  spin "Ставлю docker-compose-plugin" apt-get install -y -q docker-compose-plugin || \
+  apt_run "Ставлю docker-compose-plugin" apt-get install -y -q docker-compose-plugin || \
     warn "Не смог поставить docker-compose-plugin — если compose нет, поставь вручную."
 fi
 
