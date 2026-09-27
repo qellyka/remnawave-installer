@@ -4,7 +4,8 @@
 # Заходишь на чистый Ubuntu/Debian, запускаешь — скрипт делает всё сам:
 #   - ставит Docker + Compose, если их нет;
 #   - авторизуется в панели API-токеном (или пробует выпустить его из логина);
-#   - выпускает сертификат, ставит Nginx + сайт-заглушку;
+#   - ставит Caddy: сайт-заглушка + сертификат Let's Encrypt, который Caddy
+#     сам продлевает (Xray перечитывает файлы сертификата раз в час);
 #   - создаёт в панели профиль (Reality gRPC, Reality XHTTP, Hysteria2,
 #     опционально CDN-XHTTP через Yandex CDN и BRIDGE_IN) и саму ноду;
 #   - разворачивает контейнер remnanode и ждёт, пока панель его увидит;
@@ -18,8 +19,7 @@
 #     сайт-заглушка за ним через PROXY protocol) или чужой SNI-донор;
 #   - создаёт хосты с именами вида "🇩🇪 DE | Reality gRPC", добавляет
 #     инбаунды в сквады;
-#   - открывает порты (NODE_PORT — только для IP панели);
-#   - ставит хук продления сертификата.
+#   - выбирает случайный NODE_PORT и открывает его только для IP панели.
 #
 # Авторизация в v3: данные (/api/nodes, /api/hosts, ...) принимают ТОЛЬКО
 # API-токен (Settings -> API Tokens). Админский JWT из логина там даёт 403.
@@ -136,17 +136,20 @@ TOKEN_FILE="/root/.rw_node_token"
 
 DECOY_SITE_URL="https://raw.githubusercontent.com/qellyka/remnawave-installer/main/index.html"
 NODE_DIR="/opt/remnanode"
-SSL_DIR="/etc/nginx/ssl"
 NODE_IMAGE="ghcr.io/remnawave/node:latest"
 
 # Порты инбаундов — покупная схема + мост.
 PORT_REALITY_GRPC=2083
 PORT_REALITY_XHTTP=2053
-PORT_HY2=8443          # UDP; TCP 8443 занимает nginx-камуфляж
-PORT_CDN_LOCAL=4443    # xray слушает localhost, наружу через nginx
+PORT_HY2=8443          # UDP; TCP 8443 — TLS-камуфляж Caddy
+PORT_CDN_LOCAL=4443    # xray слушает localhost, наружу через Caddy
 PORT_BRIDGE=8888       # BRIDGE_IN, server-side routing (между нодами)
-PORT_SS_LOCAL=9443     # self-steal: nginx слушает 127.0.0.1 (PROXY protocol) за Reality
-NODE_PORT=2222         # внутренний API ноды <-> панель
+PORT_SS_LOCAL=9443     # self-steal: Caddy слушает 127.0.0.1 за Reality
+# Порт API ноды (панель <-> нода). Пусто = случайный (выбирается после установки
+# пакетов): стандартный 2222 сканеры ищут как признак ноды Remnawave.
+NODE_PORT="${NODE_PORT:-}"
+CADDY_CERTS="/var/lib/caddy/.local/share/caddy/certificates"
+CADDY_ISSUER_DIR="acme-v02.api.letsencrypt.org-directory"
 
 # Занят ли apt/dpkg — по реальным блокировкам файлов, а не по именам процессов.
 # (pgrep -f unattended-upgr ловил демон unattended-upgrade-shutdown, который
@@ -410,9 +413,29 @@ for t in apt-daily.timer apt-daily-upgrade.timer; do
   fi
 done
 apt_run "Обновляю списки пакетов" apt-get update -q || true
-apt_run "Ставлю зависимости (nginx, certbot, python3...)" \
-  apt-get install -y -q curl python3 openssl dnsutils nginx certbot ca-certificates unzip tar nftables iproute2 \
+apt_run "Ставлю зависимости (python3, openssl, nftables...)" \
+  apt-get install -y -q curl python3 openssl dnsutils ca-certificates gnupg unzip tar nftables iproute2 \
   || die "apt-get не смог поставить зависимости"
+
+# Случайный NODE_PORT (20000–59999), не занятый и не совпадающий с портами ноды.
+pick_node_port() {
+  local p i
+  for i in $(seq 1 60); do
+    p=$(( ((RANDOM << 15) | RANDOM) % 40000 + 20000 ))
+    case " $PORT_REALITY_GRPC $PORT_REALITY_XHTTP $PORT_HY2 $PORT_CDN_LOCAL $PORT_BRIDGE $PORT_SS_LOCAL " in
+      *" $p "*) continue ;;
+    esac
+    ss -Htlun "sport = :$p" 2>/dev/null | grep -q . && continue
+    echo "$p"; return 0
+  done
+  echo 2222
+}
+if [[ -z "$NODE_PORT" ]]; then
+  NODE_PORT=$(pick_node_port)
+  ok "NODE_PORT: $NODE_PORT (случайный)"
+else
+  log "NODE_PORT: $NODE_PORT (задан вручную)"
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   apt_run "Ставлю Docker (get.docker.com)" bash -c 'curl -fsSL https://get.docker.com | sh' \
@@ -431,9 +454,9 @@ fi
 PUBLIC_IP=$(curl -s -4 --max-time 5 https://api.ipify.org || echo "")
 RESOLVED=$(dig +short "$NODE_DOMAIN" A | tail -n1 || true)
 if [[ -z "$RESOLVED" ]]; then
-  warn "$NODE_DOMAIN пока не резолвится — certbot, скорее всего, не пройдёт."
+  warn "$NODE_DOMAIN пока не резолвится — сертификат, скорее всего, не выпустится."
 elif [[ -n "$PUBLIC_IP" && "$RESOLVED" != "$PUBLIC_IP" ]]; then
-  warn "$NODE_DOMAIN резолвится в $RESOLVED, а не в $PUBLIC_IP — certbot может не пройти."
+  warn "$NODE_DOMAIN резолвится в $RESOLVED, а не в $PUBLIC_IP — сертификат может не выпуститься."
   warn "Если домен в Cloudflare — выключи проксирование (серое облако): с оранжевым не заработают ни Reality, ни Hysteria2."
 else
   ok "DNS в порядке: $NODE_DOMAIN -> $RESOLVED"
@@ -441,9 +464,9 @@ fi
 # Let's Encrypt предпочитает IPv6: чужая AAAA-запись = провал выпуска.
 RESOLVED6=$(dig +short "$NODE_DOMAIN" AAAA | grep ':' | tail -n1 || true)
 if [[ -n "$RESOLVED6" ]] && ! ip -6 addr 2>/dev/null | grep -qi "${RESOLVED6%%/*}"; then
-  warn "У $NODE_DOMAIN есть AAAA-запись $RESOLVED6, но это не адрес сервера — удали её, иначе certbot упадёт."
+  warn "У $NODE_DOMAIN есть AAAA-запись $RESOLVED6, но это не адрес сервера — удали её, иначе сертификат не выпустится."
 fi
-# Ядро без IPv6 (ipv6.disable=1): слушать [::] нельзя — и nginx, и xray упадут.
+# Ядро без IPv6 (ipv6.disable=1): слушать [::] нельзя — xray упадёт.
 HAS_V6=false; [[ -e /proc/net/if_inet6 ]] && HAS_V6=true
 PANEL_IP=$(dig +short "$PANEL_HOST" A | tail -n1 || true)
 # Если панель за Cloudflare/CDN, DNS отдаёт IP прокси, а не сервера панели —
@@ -822,50 +845,150 @@ PICKEOF
   log "Выход: $EXIT_NAME ($EXIT_CC). Префикс хостов: \"$HOST_PREFIX\""
 fi
 
-step "Nginx, заглушка и сертификат"
+step "Caddy: сайт-заглушка и сертификат"
 # ---------------------------------------------------------------------------
-# Nginx + сертификат + заглушка (сначала серт — он нужен профилю)
+# Caddy вместо nginx+certbot: сам выпускает и продлевает сертификат LE, без
+# хуков и копирования. Xray берёт файлы прямо из хранилища Caddy (каталог
+# смонтирован в контейнер) и перечитывает их раз в час — продление без рестарта.
 # ---------------------------------------------------------------------------
 CDN_PATH="/uploadfiles/"
-log "Настраиваю Nginx и выпускаю сертификат..."
-mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled "$SSL_DIR" /var/www/certbot /var/www/html
-rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/hy2-ping.conf
+CERT_DIR_HOST="$CADDY_CERTS/$CADDY_ISSUER_DIR/$NODE_DOMAIN"
+CERT_FILE_CT="/caddy-certs/$CADDY_ISSUER_DIR/$NODE_DOMAIN/$NODE_DOMAIN.crt"
+KEY_FILE_CT="/caddy-certs/$CADDY_ISSUER_DIR/$NODE_DOMAIN/$NODE_DOMAIN.key"
 
+# Повторный прогон: старый контейнер может держать нужные порты (443 и т.д.).
+if [[ -f "$NODE_DIR/docker-compose.yml" ]]; then
+  docker compose -f "$NODE_DIR/docker-compose.yml" down >/dev/null 2>&1 || true
+fi
+# Переход со старой версии скрипта: nginx и хук certbot больше не нужны.
+if systemctl is-active --quiet nginx 2>/dev/null; then
+  systemctl disable --now nginx >/dev/null 2>&1 || true
+  warn "nginx от прошлой версии скрипта остановлен и отключён (его заменяет Caddy)."
+fi
+rm -f /etc/letsencrypt/renewal-hooks/deploy/rw-hy2-cert.sh
+
+caddy_ok() {  # нужен Caddy >= 2.7
+  local v; v=$(caddy version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+  [[ -n "$v" ]] && [[ "$(printf '%s\n2.7.0\n' "$v" | sort -V | head -1)" == "2.7.0" ]]
+}
+if ! caddy_ok; then
+  # Официальный репозиторий: в Debian 12 / Ubuntu 24.04 штатный Caddy 2.6 — старый.
+  apt_run "Подключаю репозиторий Caddy" bash -c '
+    set -e
+    curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+      | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+      > /etc/apt/sources.list.d/caddy-stable.list
+    chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
+    apt-get update -q' || die "Не смог подключить репозиторий Caddy"
+  apt_run "Ставлю Caddy" apt-get install -y -q caddy || die "Не смог поставить Caddy"
+  caddy_ok || die "Нужен Caddy 2.7+, установлен: $(caddy version 2>/dev/null | head -1)"
+else
+  ok "Caddy уже установлен: $(caddy version 2>/dev/null | awk '{print $1}')"
+fi
+
+mkdir -p /var/www/html
 if curl -fsSL "$DECOY_SITE_URL" -o /var/www/html/index.html 2>/dev/null && [[ -s /var/www/html/index.html ]]; then
   ok "Заглушка скачана с GitHub."
 else
   warn "Не смог скачать заглушку — кладу минимальную."
   echo '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Service</title></head><body><h1>It works</h1></body></html>' > /var/www/html/index.html
 fi
-chown -R www-data:www-data /var/www/html
+chmod -R a+rX /var/www/html
 
-cat > /etc/nginx/sites-available/default <<EOF
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
-    location /.well-known/acme-challenge/ { root /var/www/certbot; }
-    location / { root /var/www/html; index index.html; }
+# self-steal: публичный 443 занимает Reality, сайт Caddy — на 127.0.0.1:9443
+# (Reality отдаёт туда неавторизованные подключения). Иначе — обычный 443.
+if [[ "$SELF_STEAL" == "true" ]]; then
+  CADDY_HTTPS_PORT=$PORT_SS_LOCAL; CADDY_SITE_BIND="	bind 127.0.0.1"
+else
+  CADDY_HTTPS_PORT=443; CADDY_SITE_BIND=""
+fi
+CADDY_CDN_BLOCK=""
+if [[ "$ENABLE_CDN" == "true" ]]; then
+  CADDY_CDN_BLOCK="	handle /uploadfiles {
+		respond 404
+	}
+	handle /uploadfiles/* {
+		header Cache-Control \"no-store, no-cache\"
+		header CDN-Cache-Control \"no-store\"
+		header X-Accel-Buffering no
+		header Pragma no-cache
+		reverse_proxy 127.0.0.1:$PORT_CDN_LOCAL {
+			flush_interval -1
+			header_up X-Real-IP {remote_host}
+			transport http {
+				versions 1.1
+				dial_timeout 10s
+				read_timeout 1h
+				write_timeout 1h
+			}
+		}
+	}"
+fi
+mkdir -p /etc/caddy
+cat > /etc/caddy/Caddyfile <<EOF
+# Сгенерировано remnanode-deploy.sh
+{
+	# Только Let's Encrypt и только HTTP-01 на :80: в режиме self-steal публичный
+	# 443 держит Reality, TLS-ALPN туда не достучится.
+	cert_issuer acme {
+		dir https://acme-v02.api.letsencrypt.org/directory
+		disable_tlsalpn_challenge
+	}
+	https_port $CADDY_HTTPS_PORT
+	default_sni $NODE_DOMAIN
+	auto_https disable_redirects
+	servers {
+		# без HTTP/3: UDP 8443 занят Hysteria2
+		protocols h1 h2
+	}
+}
+
+(decoy) {
+	header -Server
+	root * /var/www/html
+	handle /health {
+		header Content-Type application/json
+		respond \`{"status":"ok","service":"media-gateway","version":"4.2.1"}\` 200
+	}
+$CADDY_CDN_BLOCK
+	handle {
+		file_server
+	}
+}
+
+http://$NODE_DOMAIN {
+	redir https://{host}{uri} permanent
+}
+
+https://$NODE_DOMAIN {
+$CADDY_SITE_BIND
+	import decoy
+}
+
+# TLS-камуфляж на TCP 8443 (рядом с Hysteria2 на UDP 8443)
+https://$NODE_DOMAIN:$PORT_HY2 {
+	header -Server
+	respond "ok" 200
 }
 EOF
-ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
-[[ "$HAS_V6" == "true" ]] || sed -i '/listen \[::\]/d' /etc/nginx/sites-available/default
-nginx -t >/dev/null 2>&1 || die "Базовый конфиг Nginx не проходит — nginx -t покажет причину"
-systemctl enable --now nginx >/dev/null 2>&1 || true
-systemctl reload nginx 2>/dev/null || systemctl restart nginx
+caddy fmt --overwrite /etc/caddy/Caddyfile >/dev/null 2>&1 || true
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >> "$LOG_FILE" 2>&1 \
+  || die "Caddyfile не проходит проверку — см. $LOG_FILE"
+systemctl enable caddy >/dev/null 2>&1 || true
+systemctl restart caddy || die "Caddy не запустился — journalctl -u caddy -n 50"
 
-if [[ ! -d "/etc/letsencrypt/live/$NODE_DOMAIN" ]]; then
-  spin "Выпускаю сертификат Let's Encrypt для $NODE_DOMAIN" certbot certonly --webroot -w /var/www/certbot -d "$NODE_DOMAIN" \
-    --key-type ecdsa --non-interactive --agree-tos --register-unsafely-without-email \
-    || warn "Certbot не смог получить сертификат"
-else
-  log "Сертификат для $NODE_DOMAIN уже есть — пропускаю выпуск."
-fi
-[[ -d "/etc/letsencrypt/live/$NODE_DOMAIN" ]] \
-  || die "Без сертификата дальше нельзя (нужен Hysteria2 и CDN-origin). Поправь DNS, запусти заново."
-cp "/etc/letsencrypt/live/$NODE_DOMAIN/fullchain.pem" "$SSL_DIR/cdn.crt"
-cp "/etc/letsencrypt/live/$NODE_DOMAIN/privkey.pem"   "$SSL_DIR/cdn.key"
-chmod 644 "$SSL_DIR/cdn.crt"; chmod 600 "$SSL_DIR/cdn.key"
+wait_cert() {
+  local i
+  for i in $(seq 1 90); do
+    [[ -s "$CERT_DIR_HOST/$NODE_DOMAIN.crt" && -s "$CERT_DIR_HOST/$NODE_DOMAIN.key" ]] && return 0
+    sleep 2
+  done
+  return 1
+}
+spin "Caddy выпускает сертификат Let's Encrypt для $NODE_DOMAIN" wait_cert \
+  || die "Caddy не получил сертификат за 3 мин — проверь A-запись и порт 80: journalctl -u caddy -n 50"
+ok "Caddy готов: https://$NODE_DOMAIN отдаёт заглушку, сертификат продлевается сам."
 
 step "Reality: выбор SNI-донора"
 # ---------------------------------------------------------------------------
@@ -883,7 +1006,7 @@ SNI_DONOR=""; _best_ms=999999
 if [[ "$SELF_STEAL" == "true" ]]; then
   SNI_DONOR="$NODE_DOMAIN"
   SNI_CANDIDATES=()
-  ok "Self-steal: SNI = $NODE_DOMAIN, Reality -> nginx 127.0.0.1:$PORT_SS_LOCAL (PROXY protocol)"
+  ok "Self-steal: SNI = $NODE_DOMAIN, Reality -> Caddy 127.0.0.1:$PORT_SS_LOCAL"
 else
   log "Выбираю SNI-донора Reality..."
 fi
@@ -1078,7 +1201,9 @@ if [[ "$WARP_MODE" != "off" ]]; then
   SERVER_LOC=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace | grep '^loc=' | cut -d= -f2 || true)
   WANT_LOC="${COUNTRY_CODE:-$SERVER_LOC}"
   log "Страна сервера: ${SERVER_LOC:-?}; нужна страна WARP-выхода: ${WANT_LOC:-любая}"
-  WARP_ENDPOINTS=("engage.cloudflareclient.com:2408" "162.159.192.1:2408" "162.159.193.1:2408"
+  # Только IP: доменный эндпоинт Xray резолвит своим DNS, а тот при правиле
+  # «весь трафик -> warp» сам идёт в WARP — туннель не может подняться.
+  WARP_ENDPOINTS=("162.159.192.1:2408" "162.159.193.1:2408"
                   "162.159.195.1:2408" "188.114.96.1:2408" "188.114.97.1:2408"
                   "188.114.98.1:2408" "188.114.99.1:2408")
   WARP_EP=""; WARP_FALLBACK_EP=""; WARP_FALLBACK_INFO=""
@@ -1177,10 +1302,11 @@ P_XHTTP = int(os.environ["RW_PORT_REALITY_XHTTP"]); P_HY2 = int(os.environ["RW_P
 P_CDN = int(os.environ["RW_PORT_CDN_LOCAL"]); P_BRIDGE = int(os.environ["RW_PORT_BRIDGE"])
 SNI = os.environ.get("RW_SNI_DONOR", "www.google.com")
 SELF_STEAL = os.environ.get("RW_SELF_STEAL") == "true"
-# self-steal: неавторизованные подключения Reality отдаёт СВОЕМУ nginx (сайт
-# с настоящим LE-сертификатом домена) + PROXY protocol, чтобы nginx видел IP.
+# self-steal: неавторизованные подключения Reality отдаёт СВОЕМУ Caddy (сайт с
+# настоящим LE-сертификатом домена). Без PROXY protocol: IP посетителей заглушки
+# нам не нужен, а лишнее звено — лишний шанс сломать handshake Reality.
 R_DEST = f"127.0.0.1:{os.environ.get('RW_PORT_SS_LOCAL', '9443')}" if SELF_STEAL else f"{SNI}:443"
-R_XVER = 1 if SELF_STEAL else 0
+R_XVER = 0
 SUFFIX = os.environ["RW_TAG_SUFFIX"]
 LISTEN6 = "::" if os.environ.get("RW_HAS_V6") == "true" else "0.0.0.0"
 COUNTRY = (os.environ.get("RW_COUNTRY_CODE") or "XX").upper()
@@ -1263,8 +1389,8 @@ inbounds = [
      "settings": {"clients": [], "version": 2}, "sniffing": SNIFF,
      "streamSettings": {"network": "hysteria", "security": "tls",
                         "tlsSettings": {"alpn": ["h3"],
-                            "certificates": [{"certificateFile": "/etc/nginx/ssl/cdn.crt",
-                                              "keyFile": "/etc/nginx/ssl/cdn.key"}]}}},
+                            "certificates": [{"certificateFile": os.environ["RW_CERT_FILE"],
+                                              "keyFile": os.environ["RW_KEY_FILE"]}]}}},
     # Reality + XHTTP (прямой) — работает на свежих клиентах (Happ и т.п.)
     {"tag": T_XHTTP, "port": P_XHTTP, "listen": "0.0.0.0", "protocol": "vless",
      "settings": {"clients": [], "decryption": "none"}, "sniffing": SNIFF,
@@ -1303,6 +1429,7 @@ PROFILE_NAME = (f"node-{safe}"[:23].rstrip("-")) + "-" + rnd
 profile_outbounds = [{"tag": "direct", "protocol": "freedom"},
                      {"tag": "block", "protocol": "blackhole"}]
 profile_rules = [
+    {"type": "field", "inboundTag": ["dns-internal"], "outboundTag": "direct"},
     # Клиенты НЕ должны ходить в локальную сеть/метадату сервера (169.254.169.254 и т.п.)
     {"ip": ["geoip:private"], "type": "field", "outboundTag": "block"},
     {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"}]
@@ -1346,7 +1473,10 @@ if WARP_MODE != "off" and WARP_OUT and os.path.exists(WARP_OUT):
 
 profile_config = {
     "log": {"loglevel": "warning"},
-    "dns": {"servers": [{"address": "8.8.8.8", "skipFallback": False}], "queryStrategy": "UseIPv4"},
+    # tag: свои DNS-запросы Xray помечаем и выпускаем напрямую (правило ниже),
+    # чтобы они не уходили в WARP/каскад и не зацикливались.
+    "dns": {"tag": "dns-internal", "servers": [{"address": "8.8.8.8", "skipFallback": False}],
+            "queryStrategy": "UseIPv4"},
     "inbounds": inbounds,
     "outbounds": profile_outbounds,
     # IPIfNonMatch (резолв каждого домена ради geoip) нужен только входу с geoip:ru;
@@ -1580,7 +1710,7 @@ env RW_RESULT_FILE="$WORK_DIR/result.json" RW_CDN_HOST_NAME="$CDN_HOST_NAME" \
   RW_PORT_CDN_LOCAL="$PORT_CDN_LOCAL" RW_PORT_BRIDGE="$PORT_BRIDGE" \
   RW_SID_GRPC="$(openssl rand -hex 8)" \
   RW_SID_XHTTP="$(openssl rand -hex 8)" RW_XHTTP_PATH="/$(openssl rand -hex 8)/" \
-  RW_HAS_V6="$HAS_V6" RW_COUNTRY_CODE="${COUNTRY_CODE:-$ENTRY_CC}" \
+  RW_CERT_FILE="$CERT_FILE_CT" RW_KEY_FILE="$KEY_FILE_CT" RW_HAS_V6="$HAS_V6" RW_COUNTRY_CODE="${COUNTRY_CODE:-$ENTRY_CC}" \
   python3 "$WORK_DIR/deploy.py" >/dev/null || die "Провижининг в панели не прошёл (см. ошибку выше)."
 NODE_NAME=$(python3 -c "import json;print(json.load(open('$WORK_DIR/result.json'))['nodeName'])")
 
@@ -1598,112 +1728,6 @@ if [[ -z "$SECRET_KEY" ]]; then
   [[ -n "$SECRET_KEY" ]] || die "Без SECRET_KEY нода не подключится."
 fi
 
-# ---------------------------------------------------------------------------
-# Боевой Nginx (заглушка + камуфляж 8443 + origin CDN)
-# ---------------------------------------------------------------------------
-log "Пишу боевой конфиг Nginx..."
-# Повторный прогон со сменой маскировки: старый контейнер может держать :443,
-# который теперь нужен nginx (или наоборот) — останавливаем его заранее.
-if [[ -f "$NODE_DIR/docker-compose.yml" ]]; then
-  docker compose -f "$NODE_DIR/docker-compose.yml" down >/dev/null 2>&1 || true
-fi
-# nginx >= 1.25.1: "listen ... http2" устарел, нужен "http2 on;".
-NGX_VER=$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-if [[ -n "$NGX_VER" ]] && [[ "$(printf '%s\n1.25.1\n' "$NGX_VER" | sort -V | head -1)" == "1.25.1" ]]; then
-  NGX_H2_LISTEN=""; NGX_H2_DIRECTIVE="    http2 on;"
-else
-  NGX_H2_LISTEN=" http2"; NGX_H2_DIRECTIVE=""
-fi
-if [[ "$SELF_STEAL" == "true" ]]; then
-  # Публичный 443 занимает Reality; nginx — только локально, за ним.
-  NGX_TLS_LISTEN="    listen 127.0.0.1:$PORT_SS_LOCAL ssl${NGX_H2_LISTEN} proxy_protocol default_server;
-    set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;"
-else
-  NGX_TLS_LISTEN="    listen 443 ssl${NGX_H2_LISTEN} default_server;
-    listen [::]:443 ssl${NGX_H2_LISTEN} default_server;"
-fi
-cat > /etc/nginx/conf.d/hy2-ping.conf <<EOF
-server {
-    listen 8443 ssl;
-    listen [::]:8443 ssl;
-    server_name _;
-    ssl_certificate     $SSL_DIR/cdn.crt;
-    ssl_certificate_key $SSL_DIR/cdn.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    location / { return 200 'ok'; }
-}
-EOF
-{
-  if [[ "$ENABLE_CDN" == "true" ]]; then
-    echo "  upstream xray_xhttp { server 127.0.0.1:$PORT_CDN_LOCAL; keepalive 128; }"
-  fi
-  cat <<EOF
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-${NGX_TLS_LISTEN}
-${NGX_H2_DIRECTIVE}
-    server_name _;
-
-    ssl_certificate     $SSL_DIR/cdn.crt;
-    ssl_certificate_key $SSL_DIR/cdn.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    location /.well-known/acme-challenge/ { root /var/www/certbot; }
-
-    location = /health {
-        default_type application/json;
-        return 200 '{"status":"ok","service":"media-gateway","version":"4.2.1"}';
-    }
-EOF
-  if [[ "$ENABLE_CDN" == "true" ]]; then
-    cat <<EOF
-
-    location = /uploadfiles { return 404; }
-    location /uploadfiles/ {
-        proxy_pass http://xray_xhttp;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_pass_request_headers on;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_cache off;
-        proxy_max_temp_file_size 0;
-        gzip off;
-        proxy_connect_timeout 10s;
-        proxy_read_timeout 1h;
-        proxy_send_timeout 1h;
-        send_timeout 1h;
-        client_max_body_size 0;
-        proxy_socket_keepalive on;
-        add_header X-Accel-Buffering no always;
-        add_header Cache-Control "no-store, no-cache" always;
-        add_header CDN-Cache-Control "no-store" always;
-        add_header Pragma "no-cache" always;
-        add_header Expires "0" always;
-        add_header Accept-Ranges none always;
-    }
-EOF
-  fi
-  cat <<EOF
-
-    location / {
-        root /var/www/html;
-        index index.html;
-        try_files \$uri \$uri/ =404;
-    }
-}
-EOF
-} > /etc/nginx/sites-available/default
-[[ "$HAS_V6" == "true" ]] || sed -i '/listen \[::\]/d' /etc/nginx/sites-available/default /etc/nginx/conf.d/hy2-ping.conf
-nginx -t || die "Итоговый конфиг Nginx не проходит проверку"
-systemctl reload nginx 2>/dev/null || systemctl restart nginx
-ok "Nginx готов: https://$NODE_DOMAIN отдаёт заглушку."
 
 step "Запуск ноды"
 # ---------------------------------------------------------------------------
@@ -1733,13 +1757,13 @@ services:
     env_file:
       - .env
     volumes:
-      - /etc/nginx/ssl:/etc/nginx/ssl:ro
+      - $CADDY_CERTS:/caddy-certs:ro
 EOF
 spin "Поднимаю контейнер remnanode" docker compose -f "$NODE_DIR/docker-compose.yml" up -d \
   || warn "docker compose up вернул ошибку — проверь: docker logs remnanode"
 
 
-step "Фаервол и продление сертификата"
+step "Фаервол"
 # ---------------------------------------------------------------------------
 # Firewall — политика drop совместима (правила в существующую inet filter input)
 # ---------------------------------------------------------------------------
@@ -1851,20 +1875,6 @@ else
   warn "Сервер без фаервола: все порты открыты. NODE_PORT $NODE_PORT защищён только SECRET_KEY."
 fi
 
-# ---------------------------------------------------------------------------
-# Хук продления сертификата
-# ---------------------------------------------------------------------------
-log "Ставлю хук продления сертификата..."
-mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-cat > /etc/letsencrypt/renewal-hooks/deploy/rw-hy2-cert.sh <<EOF
-#!/bin/bash
-cp /etc/letsencrypt/live/$NODE_DOMAIN/fullchain.pem $SSL_DIR/cdn.crt
-cp /etc/letsencrypt/live/$NODE_DOMAIN/privkey.pem   $SSL_DIR/cdn.key
-chmod 600 $SSL_DIR/cdn.key
-nginx -s reload 2>/dev/null || systemctl reload nginx 2>/dev/null || true
-docker restart remnanode 2>/dev/null || true
-EOF
-chmod +x /etc/letsencrypt/renewal-hooks/deploy/rw-hy2-cert.sh
 
 step "Проверка связи с панелью"
 # ---------------------------------------------------------------------------
@@ -1922,6 +1932,7 @@ kv "Роль"       "$ROLE_TXT"
 kv "Домен"      "https://$NODE_DOMAIN  (сайт-заглушка)"
 kv "UUID"       "$NODE_UUID"
 kv "Профиль"    "$PROFILE_UUID"
+kv "NODE_PORT"  "$NODE_PORT${PANEL_IP:+ (только для $PANEL_IP)}"
 if [[ "$SELF_STEAL" == "true" ]]; then
   kv "Маскировка" "self-steal · SNI $SNI_DONOR · сайт за Reality на 443"
 else
@@ -1942,7 +1953,7 @@ printf '\n  %s╭─ Инбаунды%s\n' "$C_MAG" "$C_RST"
 kv "Reality gRPC"  "TCP $PORT_REALITY_GRPC"
 kv "Reality XHTTP" "TCP $PORT_REALITY_XHTTP$([[ "$SELF_STEAL" == "true" ]] && echo "  (self-steal, сайт-заглушка за ним)")"
 kv "Hysteria2"     "UDP $PORT_HY2  (UDP должен быть открыт у хостера)"
-[[ "$ENABLE_CDN" == "true" ]]    && kv "CDN XHTTP" "Yandex CDN → nginx → 127.0.0.1:$PORT_CDN_LOCAL"
+[[ "$ENABLE_CDN" == "true" ]]    && kv "CDN XHTTP" "Yandex CDN → Caddy → 127.0.0.1:$PORT_CDN_LOCAL"
 [[ "$ENABLE_BRIDGE" == "true" ]] && kv "Мост" "TCP $PORT_BRIDGE · VLESS+Reality+XHTTP · только сервисный юзер"
 printf '  %s╰─%s\n' "$C_MAG" "$C_RST"
 
