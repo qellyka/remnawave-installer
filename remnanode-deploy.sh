@@ -194,6 +194,24 @@ apt_run() {
   return 1
 }
 
+# Ответы да/нет терпимы к пробелам, \r и русской раскладке (y -> «н», n -> «т»).
+is_yes() {
+  local a; a=$(printf '%s' "$1" | tr -d '[:space:]')
+  case "$a" in y|Y|yes|Yes|YES|у|У|н|Н|д|Д|да|Да|ДА) return 0 ;; *) return 1 ;; esac
+}
+is_no() {
+  local a; a=$(printf '%s' "$1" | tr -d '[:space:]')
+  case "$a" in n|N|no|No|NO|т|Т|нет|Нет|НЕТ) return 0 ;; *) return 1 ;; esac
+}
+# Сбросить то, что успели напечатать, пока шли долгие операции (иначе случайный
+# Enter во время ожидания молча ответит на следующий вопрос).
+flush_input() {
+  [[ -t 0 ]] || return 0
+  local _j
+  while read -r -t 0.05 -n 256 _j 2>/dev/null; do :; done
+  return 0
+}
+
 is_ip() {  # IPv4 или IPv6 (грубая, но достаточная проверка)
   [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || [[ "$1" =~ ^[0-9A-Fa-f:]+:[0-9A-Fa-f:.]*$ ]]
 }
@@ -220,7 +238,7 @@ AUTH_CHOICE=""
 API_TOKEN=""; RW_LOGIN=""; RW_PASSWORD=""
 if [[ -s "$TOKEN_FILE" ]]; then
   read -rp "${Q}Нашёл сохранённый API-токен ($TOKEN_FILE). Использовать его? [Y/n]: " USE_SAVED
-  if [[ ! "$USE_SAVED" =~ ^[Nn]$ ]]; then
+  if ! is_no "$USE_SAVED"; then
     API_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
     AUTH_CHOICE="saved"
   fi
@@ -267,7 +285,7 @@ if [[ "$NODE_ROLE" == "exit" ]]; then
   echo "  подключаться входные ноды (VLESS+Reality+XHTTP, порт $PORT_BRIDGE)."
   echo "  В подписку он не идёт, доступ — только у сервисного пользователя."
   read -rp "${Q}Включить BRIDGE_IN? [y/N]: " BRIDGE_ANS
-  if [[ "$BRIDGE_ANS" =~ ^[Yy]$ ]]; then
+  if is_yes "$BRIDGE_ANS"; then
     ENABLE_BRIDGE=true
     echo "  IP входных нод, которым разрешить порт $PORT_BRIDGE (через пробел)."
     echo "  Enter — открыть всем (мост всё равно закрыт Reality + UUID)."
@@ -676,8 +694,9 @@ if [[ -n "$OLD_NODE" ]]; then
   [[ "$_on_bridge" == "1" ]] && warn "Это выход каскада: входные ноды, смотрящие на неё, придётся переустановить."
   echo "  Пересоздание удалит старую ноду, её профиль, хосты и служебного юзера моста."
   echo "  Обычные пользователи и их сквады не трогаются."
+  flush_input
   read -rp "${Q}Удалить старую ноду и поставить заново? [y/N]: " _del
-  [[ "$_del" =~ ^[Yy]$ ]] || die "Отменено: нода с этим адресом уже есть в панели."
+  is_yes "$_del" || die "Отменено: нода с этим адресом уже есть в панели."
   python3 "$WORK_DIR/existing.py" delete "$PUBLIC_IP" "$NODE_DOMAIN" || die "Не смог удалить старую ноду — удали её в панели вручную."
   ok "Старая нода «$_on_name» удалена из панели."
 fi
@@ -841,7 +860,7 @@ PICKEOF
   _def="n"; [[ "$ENTRY_CC" == "RU" ]] && _def="y"
   read -rp "${Q}Вход в $ENTRY_CC. Российские сайты отпускать напрямую с входа? [y/n, Enter — $_def]: " _rd
   _rd="${_rd:-$_def}"
-  ENTRY_RU_DIRECT=false; [[ "$_rd" =~ ^[Yy]$ ]] && ENTRY_RU_DIRECT=true
+  ENTRY_RU_DIRECT=false; is_yes "$_rd" && ENTRY_RU_DIRECT=true
   log "Выход: $EXIT_NAME ($EXIT_CC). Префикс хостов: \"$HOST_PREFIX\""
 fi
 
@@ -1172,6 +1191,20 @@ WTEOF
   echo "$(grep '^loc=' <<<"$tr" | cut -d= -f2) $(grep '^ip=' <<<"$tr" | cut -d= -f2)"
 }
 
+warp_license_maybe() {
+  [[ -n "$WARP_LICENSE" ]] || return 0
+  local _acct
+  if _acct=$(warp_apply_license "$WARP_LICENSE"); then
+    case "$_acct" in
+      unlimited|plus) ok "WARP+ активирован (тип аккаунта: $_acct)." ;;
+      *) warn "Ключ принят, но аккаунт остался '$_acct' — лимит устройств исчерпан или ключ не подходит. Работаю на бесплатном WARP." ;;
+    esac
+  else
+    warn "Не удалось применить WARP+ ключ — работаю на бесплатном WARP."
+  fi
+  return 0
+}
+
 step "Cloudflare WARP"
 [[ "$WARP_MODE" == "off" ]] && log "WARP выключен — пропускаю."
 if [[ "$WARP_MODE" != "off" ]]; then
@@ -1184,16 +1217,7 @@ if [[ "$WARP_MODE" != "off" ]]; then
     warn "Не удалось зарегистрировать WARP — продолжаю без него."
     WARP_MODE="off"
   fi
-  if [[ "$WARP_MODE" != "off" && -n "$WARP_LICENSE" ]]; then
-    if _acct=$(warp_apply_license "$WARP_LICENSE"); then
-      case "$_acct" in
-        unlimited|plus) log "WARP+ активирован (тип аккаунта: $_acct)." ;;
-        *) warn "Ключ принят, но аккаунт остался '$_acct' — лимит устройств исчерпан или ключ не подходит. Работаю на бесплатном WARP." ;;
-      esac
-    else
-      warn "Не удалось применить WARP+ ключ — работаю на бесплатном WARP."
-    fi
-  fi
+  if [[ "$WARP_MODE" != "off" ]]; then warp_license_maybe; fi
 fi
 
 if [[ "$WARP_MODE" != "off" ]]; then
@@ -1206,24 +1230,67 @@ if [[ "$WARP_MODE" != "off" ]]; then
   WARP_ENDPOINTS=("162.159.192.1:2408" "162.159.193.1:2408"
                   "162.159.195.1:2408" "188.114.96.1:2408" "188.114.97.1:2408"
                   "188.114.98.1:2408" "188.114.99.1:2408")
-  WARP_EP=""; WARP_FALLBACK_EP=""; WARP_FALLBACK_INFO=""
-  for ep in "${WARP_ENDPOINTS[@]}"; do
-    res=$(warp_probe "$ep")
-    if [[ -z "$res" ]]; then
-      log "  $ep — WARP не поднялся"; continue
+  WARP_ENDPOINTS+=("162.159.204.1:2408")
+  # Проверяет все эндпоинты; WARP_EP — первый с нужной страной,
+  # WARP_FALLBACK_* — первый рабочий (любая страна).
+  warp_scan() {
+    local ep res loc wip
+    WARP_EP=""; WARP_EXIT_INFO=""; WARP_FALLBACK_EP=""; WARP_FALLBACK_INFO=""
+    for ep in "${WARP_ENDPOINTS[@]}"; do
+      res=$(warp_probe "$ep")
+      if [[ -z "$res" ]]; then
+        log "  $ep — WARP не поднялся"; continue
+      fi
+      loc="${res%% *}"; wip="${res#* }"
+      log "  $ep — выход $loc ($wip)"
+      if [[ -z "$WARP_FALLBACK_EP" ]]; then WARP_FALLBACK_EP="$ep"; WARP_FALLBACK_INFO="$res"; fi
+      if [[ -z "$WANT_LOC" || "$loc" == "$WANT_LOC" ]]; then
+        WARP_EP="$ep"; WARP_EXIT_INFO="$res"; return 0
+      fi
+    done
+    return 0
+  }
+  warp_scan
+  while [[ -z "$WARP_EP" ]]; do
+    if [[ -n "$WARP_FALLBACK_EP" ]]; then
+      warn "Ни один эндпоинт не дал выход в $WANT_LOC (лучшее: ${WARP_FALLBACK_INFO%% *})."
+    else
+      warn "WARP не поднялся ни на одном эндпоинте."
     fi
-    loc="${res%% *}"; wip="${res#* }"
-    log "  $ep — выход $loc ($wip)"
-    [[ -z "$WARP_FALLBACK_EP" ]] && { WARP_FALLBACK_EP="$ep"; WARP_FALLBACK_INFO="$res"; }
-    if [[ -z "$WANT_LOC" || "$loc" == "$WANT_LOC" ]]; then
-      WARP_EP="$ep"; WARP_EXIT_INFO="$res"; break
-    fi
+    echo "  Страну выбирает Cloudflare по маршруту от сервера — повтор или новый"
+    echo "  аккаунт иногда дают другой выход."
+    echo "    1) проверить эндпоинты ещё раз"
+    echo "    2) зарегистрировать НОВЫЙ WARP-аккаунт и проверить заново"
+    [[ -n "$WARP_FALLBACK_EP" ]] && echo "    3) включить WARP как есть — выход ${WARP_FALLBACK_INFO%% *} (${WARP_FALLBACK_INFO#* })"
+    echo "    0) продолжить без WARP"
+    flush_input
+    read -rp "${Q}Выбор [1/2/3/0, Enter — 1]: " _wa
+    _wa=$(printf '%s' "$_wa" | tr -dc '0-9')
+    case "${_wa:-1}" in
+      1) log "Проверяю эндпоинты заново..."; warp_scan ;;
+      2)
+        log "Регистрирую новый WARP-аккаунт..."
+        mv -f "$WARP_FILE" "$WARP_FILE.old" 2>/dev/null || true
+        if warp_register; then
+          ok "Новый WARP-аккаунт зарегистрирован."; rm -f "$WARP_FILE.old"
+          warp_license_maybe
+          warp_scan
+        else
+          warn "Не удалось зарегистрировать новый аккаунт — оставляю прежний."
+          mv -f "$WARP_FILE.old" "$WARP_FILE" 2>/dev/null || true
+        fi
+        ;;
+      3)
+        if [[ -n "$WARP_FALLBACK_EP" ]]; then
+          WARP_EP="$WARP_FALLBACK_EP"; WARP_EXIT_INFO="$WARP_FALLBACK_INFO"
+        else
+          warn "Рабочего эндпоинта нет — выбери 1, 2 или 0."
+        fi
+        ;;
+      0) break ;;
+      *) warn "Не понял выбор." ;;
+    esac
   done
-  if [[ -z "$WARP_EP" && -n "$WARP_FALLBACK_EP" ]]; then
-    warn "Ни один эндпоинт не дал выход в $WANT_LOC (лучшее: ${WARP_FALLBACK_INFO%% *})."
-    read -rp "${Q}Всё равно включить WARP со страной ${WARP_FALLBACK_INFO%% *}? [y/N]: " _wa
-    if [[ "$_wa" =~ ^[Yy]$ ]]; then WARP_EP="$WARP_FALLBACK_EP"; WARP_EXIT_INFO="$WARP_FALLBACK_INFO"; fi
-  fi
   if [[ -n "$WARP_EP" ]]; then
     WARP_OUTBOUND_FILE="$WORK_DIR/warp-outbound.json"
     warp_outbound "$WARP_EP" "$WARP_OUTBOUND_FILE"
@@ -1794,8 +1861,9 @@ if [[ "$FW_KIND" == "none" ]] && command -v nft >/dev/null 2>&1; then
                  echo 22; } | sort -un | paste -sd, - | sed 's/,/, /g')
   warn "Фаервол не найден — сейчас открыты ВСЕ порты сервера."
   echo "  Могу включить базовый nftables: входящее закрыто, кроме SSH ($SSH_PORTS) и портов ноды."
+  flush_input
   read -rp "${Q}Включить базовый фаервол? [Y/n]: " _fw
-  if [[ ! "$_fw" =~ ^[Nn]$ ]]; then
+  if ! is_no "$_fw"; then
     cat > /etc/nftables.conf <<EOF
 #!/usr/sbin/nft -f
 # Базовый фаервол от remnanode-deploy.sh. Порты ноды добавляет rw-node-firewall.service.
