@@ -140,9 +140,19 @@ PORT_BRIDGE=8888       # BRIDGE_IN, server-side routing (между нодами
 PORT_SS_LOCAL=9443     # self-steal: nginx слушает 127.0.0.1 (PROXY protocol) за Reality
 NODE_PORT=2222         # внутренний API ноды <-> панель
 
-apt_busy() {  # fuser (psmisc) на минимальном Debian нет — смотрим процессы
-  pgrep -x apt-get >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1 \
-    || pgrep -f unattended-upgr >/dev/null 2>&1 || pgrep -f apt.systemd.daily >/dev/null 2>&1
+# Занят ли apt/dpkg — по реальным блокировкам файлов, а не по именам процессов.
+# (pgrep -f unattended-upgr ловил демон unattended-upgrade-shutdown, который
+# на Ubuntu/Debian висит ВСЕГДА — и скрипт ждал вечно.) dpkg/apt ставят
+# fcntl-блокировки; они видны в /proc/locks как major:minor:inode.
+lock_held() {
+  local f="$1" ino
+  [[ -e "$f" ]] || return 1
+  ino=$(stat -c %i "$f" 2>/dev/null) || return 1
+  grep -qE "[0-9a-f]+:[0-9a-f]+:${ino} " /proc/locks 2>/dev/null
+}
+apt_busy() {
+  lock_held /var/lib/dpkg/lock-frontend || lock_held /var/lib/dpkg/lock \
+    || lock_held /var/lib/apt/lists/lock || lock_held /var/cache/apt/archives/lock
 }
 wait_for_apt_lock() {
   local waited=0 max_wait=900
