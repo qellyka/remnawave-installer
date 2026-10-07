@@ -857,10 +857,26 @@ PICKEOF
   HOST_PREFIX="$(flag_of "$ENTRY_CC")$(flag_of "$EXIT_CC") $EXIT_CC |"
   # Механика каскада от страны не зависит; от неё зависят только две вещи:
   # отпускать ли RU-сайты напрямую и из какого списка брать SNI-донора.
-  _def="n"; [[ "$ENTRY_CC" == "RU" ]] && _def="y"
-  read -rp "${Q}Вход в $ENTRY_CC. Российские сайты отпускать напрямую с входа? [y/n, Enter — $_def]: " _rd
-  _rd="${_rd:-$_def}"
-  ENTRY_RU_DIRECT=false; is_yes "$_rd" && ENTRY_RU_DIRECT=true
+  # Выбор цифрой (не y/n): раскладка и невидимые символы не должны молча
+  # превращать «да» в «нет» — так однажды и потерялись RU-правила на входе.
+  _def=2; [[ "$ENTRY_CC" == "RU" ]] && _def=1
+  hr
+  echo "  Российские сайты на входе ($ENTRY_CC):"
+  echo "    1) напрямую с этого сервера — Яндекс, Госуслуги, банки видят IP входа"
+  echo "    2) всё через выход ($EXIT_CC)"
+  while true; do
+    flush_input
+    read -rp "${Q}Выбор [1/2, Enter — $_def]: " _rd
+    _rd=$(printf '%s' "$_rd" | tr -dc '0-9'); _rd="${_rd:-$_def}"
+    [[ "$_rd" == "1" || "$_rd" == "2" ]] && break
+    warn "Введи 1 или 2."
+  done
+  ENTRY_RU_DIRECT=false; [[ "$_rd" == "1" ]] && ENTRY_RU_DIRECT=true
+  if [[ "$ENTRY_RU_DIRECT" == "true" ]]; then
+    ok "Российские сайты — напрямую с входа, остальное — в $EXIT_NAME ($EXIT_CC)."
+  else
+    ok "Весь трафик — в $EXIT_NAME ($EXIT_CC)."
+  fi
   log "Выход: $EXIT_NAME ($EXIT_CC). Префикс хостов: \"$HOST_PREFIX\""
 fi
 
@@ -1427,6 +1443,20 @@ xhttp_path = os.environ["RW_XHTTP_PATH"]
 
 T_GRPC, T_XHTTP = f"reality-grpc-{SUFFIX}", f"reality-xhttp-{SUFFIX}"
 T_HY2, T_CDN, T_BRIDGE = f"hysteria2-{SUFFIX}", f"cdn-xhttp-{SUFFIX}", f"bridge-in-{SUFFIX}"
+
+# XHTTP через Yandex CDN — ОДИН набор и для инбаунда, и для хоста (иначе 400).
+# С 29.09.2026 Yandex CDN режет POST/PUT/PATCH/DELETE (405) и тело у GET (413),
+# а узлы CDN у части операторов тело GET молча выбрасывают — туннель висит без
+# ошибок. Поэтому аплинк — GET-запросами с данными в ЗАГОЛОВКЕ (uplinkDataKey),
+# кусками по 4 КБ: лимит заголовка на CDN 8–16 КБ, base64 раздувает данные.
+CDN_XHTTP = {
+    "mode": "packet-up",
+    "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache", "xPaddingMethod": "tokenish",
+    "xPaddingObfsMode": True, "xPaddingPlacement": "queryInHeader",
+    "uplinkHTTPMethod": "GET",
+    "uplinkDataPlacement": "header", "uplinkDataKey": "data",
+    "scMaxEachPostBytes": 4096, "scMaxConcurrentPosts": 1, "scMinPostsIntervalMs": 30,
+}
 SNIFF = {"enabled": True, "destOverride": ["http", "tls", "quic"]}
 
 MIN_CLIENT_VER = os.environ.get("RW_MIN_CLIENT_VER", "26.7.28")
@@ -1472,9 +1502,7 @@ if ENABLE_CDN:
          "settings": {"clients": [], "decryption": "none"},
          "sniffing": {"enabled": True, "routeOnly": False, "destOverride": ["http", "tls", "quic"]},
          "streamSettings": {"network": "xhttp", "security": "none",
-             "xhttpSettings": {"mode": "packet-up", "path": CDN_PATH,
-                 "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache", "xPaddingMethod": "tokenish",
-                 "uplinkHTTPMethod": "GET", "xPaddingObfsMode": True, "xPaddingPlacement": "queryInHeader"}}})
+             "xhttpSettings": dict(CDN_XHTTP, path=CDN_PATH)}})
 if ENABLE_BRIDGE:
     # Мост для каскада: VLESS + Reality + XHTTP. Голый VLESS/TCP (как было)
     # или SS через границу ТСПУ распознаёт сразу; Reality выглядит как TLS.
@@ -1667,9 +1695,7 @@ if ENABLE_CDN:
     mkhost(T_CDN, {"remark": remark(os.environ.get("RW_CDN_HOST_NAME") or "LTE"), "address": CDN_PUBLIC, "port": 443,
         "sni": CDN_PUBLIC, "host": CDN_PUBLIC, "path": CDN_PATH, "alpn": "h3,h2,http/1.1",
         "fingerprint": "random", "securityLayer": "TLS",
-        "xhttpExtraParams": {"mode": "packet-up", "xPaddingKey": "_dc", "xPaddingHeader": "X-Cache",
-            "xPaddingMethod": "tokenish", "uplinkHTTPMethod": "GET", "xPaddingObfsMode": True,
-            "xPaddingPlacement": "queryInHeader"}})
+        "xhttpExtraParams": dict(CDN_XHTTP)})
 # BRIDGE_IN — хост НЕ создаём: клиенты к нему не подключаются (это межнодовый вход).
 
 # Выбор сквадов управляется из bash (меню после логина):
