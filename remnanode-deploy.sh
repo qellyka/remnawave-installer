@@ -773,6 +773,7 @@ log "Сквады: режим $SQUAD_MODE${NEW_SQUAD_NAME:+ ($NEW_SQUAD_NAME)}${
 EXIT_FILE=""
 ENTRY_CC=""
 ENTRY_RU_DIRECT=false
+ENTRY_EXTRA_DIRECT=""
 if [[ "$NODE_ROLE" == "entry" ]]; then
   cat > "$WORK_DIR/exits.py" <<'EXITSEOF'
 import base64, json, os, subprocess, sys, urllib.request, urllib.error
@@ -867,7 +868,7 @@ PICKEOF
   while true; do
     flush_input
     read -rp "${Q}Выбор [1/2, Enter — $_def]: " _rd
-    _rd=$(printf '%s' "$_rd" | tr -dc '0-9'); _rd="${_rd:-$_def}"
+    _rd=$(printf '%s' "$_rd" | tr -d '[:space:]'); _rd="${_rd:-$_def}"
     [[ "$_rd" == "1" || "$_rd" == "2" ]] && break
     warn "Введи 1 или 2."
   done
@@ -877,6 +878,148 @@ PICKEOF
   else
     ok "Весь трафик — в $EXIT_NAME ($EXIT_CC)."
   fi
+
+  # Отдельные сервисы — напрямую с входа. Ищем их по названию прямо в
+  # geosite.dat ИЗ ОБРАЗА НОДЫ: так в правила попадут только категории, которые
+  # Xray на ноде точно знает (неизвестная geosite-категория = Xray не стартует).
+  GEO_INDEX="$WORK_DIR/geosite.json"
+  cat > "$WORK_DIR/geo.py" <<'GEOEOF'
+import json, sys
+# Мини-парсер protobuf geosite.dat: GeoSiteList{1: GeoSite{1: name, 2: Domain{1: type, 2: value}}}
+def fields(b):
+    i, n = 0, len(b)
+    while i < n:
+        key = 0; sh = 0
+        while True:
+            c = b[i]; i += 1; key |= (c & 0x7F) << sh; sh += 7
+            if c < 0x80: break
+        f, wt = key >> 3, key & 7
+        if wt == 0:
+            v = 0; sh = 0
+            while True:
+                c = b[i]; i += 1; v |= (c & 0x7F) << sh; sh += 7
+                if c < 0x80: break
+            yield f, v
+        elif wt == 2:
+            ln = 0; sh = 0
+            while True:
+                c = b[i]; i += 1; ln |= (c & 0x7F) << sh; sh += 7
+                if c < 0x80: break
+            yield f, b[i:i + ln]; i += ln
+        elif wt == 1: i += 8
+        elif wt == 5: i += 4
+        else: raise ValueError("bad wire type")
+cmd = sys.argv[1]
+if cmd == "index":
+    data = open(sys.argv[2], "rb").read(); idx = {}
+    for f, site in fields(data):
+        if f != 1: continue
+        name, doms = "", []
+        for g, v in fields(site):
+            if g == 1: name = v.decode(errors="replace").lower()
+            elif g == 2:
+                for h, w in fields(v):
+                    if h == 2: doms.append(w.decode(errors="replace"))
+        if name: idx[name] = doms
+    json.dump(idx, open(sys.argv[3], "w")); print(len(idx))
+elif cmd == "search":
+    idx = json.load(open(sys.argv[2])); q = sys.argv[3].lower().strip()
+    def rank(n):
+        return (0 if n == q else 1 if n.startswith(q) else 2 if q in n else 3, len(n), n)
+    hits = sorted([n for n in idx if q in n], key=rank)[:15]
+    mode = "name"
+    if not hits:  # нет категории с таким именем — ищем по доменам внутри категорий
+        # огромные сборные списки (cn, china-list, ads…) — не то, что ищут
+        hits = sorted([n for n, d in idx.items() if len(d) <= 3000 and any(q in x for x in d)],
+                      key=lambda n: (len(idx[n]), n))[:10]
+        mode = "domain"
+    for n in hits:
+        d = idx[n]
+        sample = ", ".join(([x for x in d if q in x] if mode == "domain" else d)[:3])
+        print(f"{mode}|{n}|{len(d)}|{sample}")
+elif cmd == "has":
+    sys.exit(0 if sys.argv[3].lower() in json.load(open(sys.argv[2])) else 1)
+GEOEOF
+  GEO_OK=false
+  if docker run --rm --entrypoint sh "$NODE_IMAGE" -c '
+      for p in /usr/local/share/xray /usr/share/xray /usr/local/bin /opt/xray /app; do
+        [ -s "$p/geosite.dat" ] && exec cat "$p/geosite.dat"; done
+      f=$(find / -name geosite.dat -size +100k 2>/dev/null | head -1); [ -n "$f" ] && exec cat "$f"; exit 1' \
+      > "$WORK_DIR/geosite.dat" 2>/dev/null \
+     && python3 "$WORK_DIR/geo.py" index "$WORK_DIR/geosite.dat" "$GEO_INDEX" >/dev/null 2>&1; then
+    GEO_OK=true
+  else
+    warn "Не нашёл geosite.dat в образе ноды — сервисы можно будет добавить только доменами."
+  fi
+  # geosite:category-ru в RU-правилах — только если категория реально есть в файле ноды.
+  GEO_HAS_CATRU=true
+  if [[ "$GEO_OK" == "true" ]] && ! python3 "$WORK_DIR/geo.py" has "$GEO_INDEX" category-ru; then
+    GEO_HAS_CATRU=false
+    warn "В geosite.dat ноды нет category-ru — для RU-сайтов останутся домены .ru/.su/.рф и geoip:ru."
+  fi
+
+  hr
+  echo "  Сервисы напрямую с входа ($ENTRY_CC) — например YouTube: на российском IP"
+  echo "  он без рекламы. Вводи название (youtube, twitch, discord, steam...) — найду"
+  echo "  его в geo-файлах ноды; или домен (example.com). Enter — закончить."
+  ENTRY_EXTRA_LABELS=""
+  while true; do
+    flush_input
+    read -rp "${Q}Сервис или домен (Enter — готово): " _q
+    _q=$(printf '%s' "$_q" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    [[ -z "$_q" ]] && break
+    # Домен — добавляем как есть
+    if [[ "$_q" == *.* ]]; then
+      if [[ "$_q" =~ ^([a-z0-9-]+\.)+[a-z0-9-]{2,}$ ]]; then
+        ENTRY_EXTRA_DIRECT="${ENTRY_EXTRA_DIRECT:+$ENTRY_EXTRA_DIRECT,}domain:$_q"
+        ENTRY_EXTRA_LABELS="${ENTRY_EXTRA_LABELS:+$ENTRY_EXTRA_LABELS, }$_q"
+        ok "Добавлен домен $_q (с поддоменами)."
+      else
+        warn "«$_q» — не похоже на домен."
+      fi
+      continue
+    fi
+    if [[ "$GEO_OK" != "true" ]]; then
+      warn "Поиск по geo-файлам недоступен — введи домен сервиса (например youtube.com)."
+      continue
+    fi
+    if [[ ! "$_q" =~ ^[a-z0-9!@_-]+$ ]]; then
+      warn "Название ищется латиницей: youtube, twitch, discord..."
+      continue
+    fi
+    _hits=$(python3 "$WORK_DIR/geo.py" search "$GEO_INDEX" "$_q" || true)
+    if [[ -z "$_hits" ]]; then
+      warn "«$_q» в geo-файлах не найден. Можно ввести домен сервиса (например $_q.com)."
+      continue
+    fi
+    if [[ "$(head -1 <<< "$_hits" | cut -d'|' -f1)" == "domain" ]]; then
+      echo "  Категории с «$_q» нет, но такие домены есть в категориях:"
+    else
+      echo "  Нашёл в geosite:"
+    fi
+    mapfile -t _rows <<< "$_hits"
+    for i in "${!_rows[@]}"; do
+      IFS='|' read -r _m _name _cnt _sample <<< "${_rows[$i]}"
+      printf "    %s) %-26s %s%5s доменов · %s%s\n" "$((i + 1))" "$_name" "$C_DIM" "$_cnt" "$_sample" "$C_RST"
+    done
+    read -rp "${Q}Номера через пробел (a — все, Enter — пропустить): " _pick
+    _pick=$(printf '%s' "$_pick" | tr ',' ' ')
+    [[ -z "${_pick// /}" ]] && continue
+    [[ "$_pick" =~ ^[[:space:]]*[aAаА][[:space:]]*$ ]] && _pick=$(seq 1 "${#_rows[@]}" | tr '\n' ' ')
+    for n in $_pick; do
+      if [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#_rows[@]} )); then
+        IFS='|' read -r _m _name _cnt _sample <<< "${_rows[$((n - 1))]}"
+        case ",$ENTRY_EXTRA_DIRECT," in *",geosite:$_name,"*) continue ;; esac
+        ENTRY_EXTRA_DIRECT="${ENTRY_EXTRA_DIRECT:+$ENTRY_EXTRA_DIRECT,}geosite:$_name"
+        ENTRY_EXTRA_LABELS="${ENTRY_EXTRA_LABELS:+$ENTRY_EXTRA_LABELS, }$_name"
+        ok "Добавлено: geosite:$_name ($_cnt доменов)"
+        (( _cnt > 5000 )) && warn "Большая категория: напрямую пойдёт много сайтов, не только «$_q»."
+      else
+        warn "«$n» — нет такого номера, пропускаю."
+      fi
+    done
+  done
+  [[ -n "$ENTRY_EXTRA_LABELS" ]] && ok "Напрямую с входа: $ENTRY_EXTRA_LABELS"
   log "Выход: $EXIT_NAME ($EXIT_CC). Префикс хостов: \"$HOST_PREFIX\""
 fi
 
@@ -1477,7 +1620,7 @@ inbounds = [
     # gRPC + Reality — проверено, работает везде
     {"tag": T_GRPC, "port": P_GRPC, "listen": LISTEN6, "protocol": "vless",
      "settings": {"clients": [], "decryption": "none"},
-     "sniffing": {"enabled": True, "destOverride": ["http", "tls"]},
+     "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
      "streamSettings": {"network": "grpc", "security": "reality",
                         "grpcSettings": {"serviceName": "grpc"},
                         "realitySettings": reality(grpc_key, grpc_sid)}},
@@ -1543,12 +1686,18 @@ if EXIT_FILE and os.path.exists(EXIT_FILE):
     # RU — напрямую с входа (российский IP), если включено; остальное — в выход.
     if os.environ.get("RW_ENTRY_RU_DIRECT") == "true":
       profile_rules += [
-        {"type": "field", "domain": ["geosite:category-ru", "domain:ru", "domain:su",
+        {"type": "field", "domain": (["geosite:category-ru"] if os.environ.get("RW_GEO_CATRU", "true") == "true" else []) + ["domain:ru", "domain:su",
                                      "domain:xn--p1ai", "domain:yandex.com", "domain:yandex.net",
                                      "domain:yastatic.net", "domain:vk.com", "domain:userapi.com",
                                      "domain:mycdn.me", "domain:vkuser.net"],
          "outboundTag": "direct"},
         {"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"}]
+    extra = [d for d in os.environ.get("RW_ENTRY_EXTRA_DIRECT", "").split(",") if d]
+    if extra:
+        # Выбранные сервисы (YouTube и т.п.) — тоже с IP входа.
+        profile_rules.append({"type": "field", "domain": [d if ":" in d else f"domain:{d}" for d in extra],
+                              "outboundTag": "direct"})
+        elog(f"  Напрямую с входа также: {', '.join(extra)}")
     profile_rules.append({"type": "field", "network": "tcp,udp", "outboundTag": "to-exit"})
     rd = "RU напрямую, остальное" if os.environ.get("RW_ENTRY_RU_DIRECT") == "true" else "весь трафик"
     elog(f"  Каскад: {rd} -> {ex['node']} ({ex['address']}:{ex['port']})")
@@ -1791,7 +1940,7 @@ NODE_ADDRESS="${PUBLIC_IP:-$NODE_DOMAIN}"
 log "Создаю профиль, ноду и хосты в панели..."
 env RW_RESULT_FILE="$WORK_DIR/result.json" RW_CDN_HOST_NAME="$CDN_HOST_NAME" \
   RW_WARP_MODE="$WARP_MODE" RW_WARP_OUTBOUND="$WARP_OUTBOUND_FILE" RW_WARP_DOMAINS="$WARP_DOMAINS" \
-  RW_EXIT_FILE="$EXIT_FILE" RW_ENTRY_RU_DIRECT="$ENTRY_RU_DIRECT" RW_SID_BRIDGE="$(openssl rand -hex 8)" RW_BRIDGE_PATH="/$(openssl rand -hex 8)/" \
+  RW_EXIT_FILE="$EXIT_FILE" RW_ENTRY_RU_DIRECT="$ENTRY_RU_DIRECT" RW_ENTRY_EXTRA_DIRECT="$ENTRY_EXTRA_DIRECT" RW_GEO_CATRU="${GEO_HAS_CATRU:-true}" RW_SID_BRIDGE="$(openssl rand -hex 8)" RW_BRIDGE_PATH="/$(openssl rand -hex 8)/" \
   RW_NODE_NAME="$NODE_NAME" RW_NODE_DOMAIN="$NODE_DOMAIN" RW_NODE_ADDRESS="$NODE_ADDRESS" \
   RW_NODE_PORT="$NODE_PORT" RW_HOST_PREFIX="$HOST_PREFIX" RW_TAG_SUFFIX="$TAG_SUFFIX" \
   RW_SNI_DONOR="$SNI_DONOR" RW_SELF_STEAL="$SELF_STEAL" RW_PORT_SS_LOCAL="$PORT_SS_LOCAL" RW_ENABLE_CDN="$ENABLE_CDN" RW_ENABLE_BRIDGE="$ENABLE_BRIDGE" \
@@ -2040,6 +2189,7 @@ if [[ "$NODE_ROLE" == "entry" ]]; then
   _rd="весь трафик → выход"
   [[ "$ENTRY_RU_DIRECT" == "true" ]] && _rd="RU-сайты напрямую ($ENTRY_CC), остальное → выход"
   kv "Каскад" "$_rd"
+  [[ -n "${ENTRY_EXTRA_LABELS:-}" ]] && kv "Напрямую" "$ENTRY_EXTRA_LABELS"
 fi
 printf '  %s╰─%s\n' "$C_MAG" "$C_RST"
 
