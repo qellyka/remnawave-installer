@@ -141,7 +141,9 @@ NODE_IMAGE="ghcr.io/remnawave/node:latest"
 # Порты инбаундов — покупная схема + мост.
 PORT_REALITY_GRPC=2083
 PORT_REALITY_XHTTP=2053
-PORT_HY2=8443          # UDP; TCP 8443 — TLS-камуфляж Caddy
+PORT_HY2=443           # UDP 443: рядом с TCP 443 — как у обычного сайта с HTTP/3
+ENABLE_GRPC=true       # перезаписывается вопросом «gRPC» в параметрах установки
+HY2_OBFS=""            # пароль salamander; пусто = без обфускации
 PORT_CDN_LOCAL=4443    # xray слушает localhost, наружу через Caddy
 PORT_BRIDGE=8888       # BRIDGE_IN, server-side routing (между нодами)
 PORT_SS_LOCAL=9443     # self-steal: Caddy слушает 127.0.0.1 за Reality
@@ -280,6 +282,7 @@ read_clean "Домен ноды (например de1.example.com): " NODE_DOMAI
 hr
 ENABLE_BRIDGE=false
 BRIDGE_PEERS=""
+BRIDGE_ANY=false
 if [[ "$NODE_ROLE" == "exit" ]]; then
   echo "  Мост BRIDGE_IN — делает эту ноду ВЫХОДОМ каскада: к ней будут"
   echo "  подключаться входные ноды (VLESS+Reality+XHTTP, порт $PORT_BRIDGE)."
@@ -287,13 +290,18 @@ if [[ "$NODE_ROLE" == "exit" ]]; then
   read -rp "${Q}Включить BRIDGE_IN? [y/N]: " BRIDGE_ANS
   if is_yes "$BRIDGE_ANS"; then
     ENABLE_BRIDGE=true
-    echo "  IP входных нод, которым разрешить порт $PORT_BRIDGE (через пробел)."
-    echo "  Enter — открыть всем (мост всё равно закрыт Reality + UUID)."
+    echo "  IP входных нод, которым разрешён порт $PORT_BRIDGE (через пробел)."
+    echo "  Enter — порт закрыт для всех, пока не добавишь IP (команда будет в итоге)."
+    echo "  any — открыть всем (не рекомендую: мост виден любому сканеру)."
     while true; do
       read -rp "${Q}IP входных нод: " BRIDGE_PEERS
+      BRIDGE_PEERS="$(printf '%s' "$BRIDGE_PEERS" | tr ',;' '  ')"
+      if [[ "$(printf '%s' "$BRIDGE_PEERS" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" == "any" ]]; then
+        BRIDGE_ANY=true; BRIDGE_PEERS=""; break
+      fi
       _bad=""; for ip in $BRIDGE_PEERS; do is_ip "$ip" || _bad="$ip"; done
       [[ -z "$_bad" ]] && break
-      warn "«$_bad» — не IP-адрес. Введи IP через пробел или Enter."
+      warn "«$_bad» — не IP-адрес. Введи IP через пробел, any или Enter."
     done
   fi
 fi
@@ -360,6 +368,38 @@ if [[ "$SS_ANS" == "1" ]]; then
 fi
 
 hr
+echo "  Reality gRPC — устаревший транспорт (сам Xray просит перейти на XHTTP),"
+echo "  занимает отдельный порт $PORT_REALITY_GRPC: у обычного сайта таких портов нет."
+echo "    1) включить   2) не ставить — только XHTTP на 443"
+_g_def=1; [[ "$SELF_STEAL" == "true" ]] && _g_def=2
+while true; do
+  flush_input
+  read -rp "${Q}gRPC [1/2, Enter — $_g_def]: " _g
+  _g=$(printf '%s' "$_g" | tr -d '[:space:]'); _g="${_g:-$_g_def}"
+  [[ "$_g" == "1" || "$_g" == "2" ]] && break
+  warn "Введи 1 или 2."
+done
+ENABLE_GRPC=false; [[ "$_g" == "1" ]] && ENABLE_GRPC=true
+
+hr
+echo "  Hysteria2 (UDP $PORT_HY2) без обфускации узнаётся по параметрам QUIC."
+echo "  Salamander маскирует пакеты под случайный шум. Нужен клиент с Xray 26.2+"
+echo "  (Happ, v2RayTun последних версий); на старых Hysteria2-хост не подключится."
+echo "    1) включить salamander   2) без обфускации"
+while true; do
+  flush_input
+  read -rp "${Q}Salamander [1/2, Enter — 1]: " _o
+  _o=$(printf '%s' "$_o" | tr -d '[:space:]'); _o="${_o:-1}"
+  [[ "$_o" == "1" || "$_o" == "2" ]] && break
+  warn "Введи 1 или 2."
+done
+HY2_OBFS=""
+if [[ "$_o" == "1" ]]; then
+  if command -v openssl >/dev/null 2>&1; then HY2_OBFS="$(openssl rand -hex 12)"
+  else HY2_OBFS="$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"; fi
+fi
+
+hr
 echo "  Код страны ноды (2 буквы, например DE, PL, FI) — из него соберу имена"
 echo "  хостов вида \"🇩🇪 DE | Reality gRPC\" — такой формат подхватывает шаблон автовыбора."
 # Флаг из кода страны без python (на чистом сервере его ещё может не быть):
@@ -409,6 +449,8 @@ case "$NODE_ROLE:$ENABLE_BRIDGE" in
 esac
 kv "Нода" "$NODE_NAME · $NODE_DOMAIN"
 kv "Маскировка" "$([[ "$SELF_STEAL" == "true" ]] && echo "self-steal (Reality XHTTP на 443)" || echo "SNI-донор")"
+kv "gRPC" "$([[ "$ENABLE_GRPC" == "true" ]] && echo "включён (TCP $PORT_REALITY_GRPC)" || echo "не ставим")"
+kv "Hysteria2" "UDP $PORT_HY2, $([[ -n "$HY2_OBFS" ]] && echo "salamander" || echo "без обфускации")"
 kv "CDN" "$([[ "$ENABLE_CDN" == "true" ]] && echo "$CDN_PUBLIC_DOMAIN" || echo "нет")"
 kv "WARP" "$WARP_MODE"
 [[ -n "$HOST_PREFIX" ]] && kv "Хосты" "$HOST_PREFIX …"
@@ -774,6 +816,8 @@ EXIT_FILE=""
 ENTRY_CC=""
 ENTRY_RU_DIRECT=false
 ENTRY_EXTRA_DIRECT=""
+CASCADE_TEMPLATE=""
+CASCADE_TEMPLATE_NAME="${CASCADE_TEMPLATE_NAME:-Cascade RU}"   # имя шаблона в панели
 if [[ "$NODE_ROLE" == "entry" ]]; then
   cat > "$WORK_DIR/exits.py" <<'EXITSEOF'
 import base64, json, os, subprocess, sys, urllib.request, urllib.error
@@ -863,7 +907,7 @@ PICKEOF
   _def=2; [[ "$ENTRY_CC" == "RU" ]] && _def=1
   hr
   echo "  Российские сайты на входе ($ENTRY_CC):"
-  echo "    1) напрямую с этого сервера — Яндекс, Госуслуги, банки видят IP входа"
+  echo "    1) напрямую с этого сервера — Яндекс, банки, маркетплейсы видят IP входа"
   echo "    2) всё через выход ($EXIT_CC)"
   while true; do
     flush_input
@@ -1020,6 +1064,23 @@ GEOEOF
     done
   done
   [[ -n "$ENTRY_EXTRA_LABELS" ]] && ok "Напрямую с входа: $ENTRY_EXTRA_LABELS"
+
+  # Госуслуги и другие госсайты не пускают IP хостингов — даже российских.
+  # Им нужен IP самого клиента: шаблон Xray JSON на хостах входа выпускает их
+  # напрямую с устройства, остальное идёт через каскад как обычно.
+  hr
+  echo "  Госуслуги и госсайты блокируют IP хостингов — через сервер не откроются."
+  echo "    1) пускать их напрямую с устройства клиента — шаблон «$CASCADE_TEMPLATE_NAME»"
+  echo "       на хостах входа (работает в Happ, v2RayTun, v2rayNG, Streisand)"
+  echo "    2) не трогать"
+  while true; do
+    flush_input
+    read -rp "${Q}Выбор [1/2, Enter — 1]: " _tp
+    _tp=$(printf '%s' "$_tp" | tr -d '[:space:]'); _tp="${_tp:-1}"
+    [[ "$_tp" == "1" || "$_tp" == "2" ]] && break
+    warn "Введи 1 или 2."
+  done
+  CASCADE_TEMPLATE=""; [[ "$_tp" == "1" ]] && CASCADE_TEMPLATE="$CASCADE_TEMPLATE_NAME"
   log "Выход: $EXIT_NAME ($EXIT_CC). Префикс хостов: \"$HOST_PREFIX\""
 fi
 
@@ -1117,7 +1178,7 @@ cat > /etc/caddy/Caddyfile <<EOF
 	default_sni $NODE_DOMAIN
 	auto_https disable_redirects
 	servers {
-		# без HTTP/3: UDP 8443 занят Hysteria2
+		# без HTTP/3: UDP 443 занят Hysteria2
 		protocols h1 h2
 	}
 }
@@ -1142,12 +1203,6 @@ http://$NODE_DOMAIN {
 https://$NODE_DOMAIN {
 $CADDY_SITE_BIND
 	import decoy
-}
-
-# TLS-камуфляж на TCP 8443 (рядом с Hysteria2 на UDP 8443)
-https://$NODE_DOMAIN:$PORT_HY2 {
-	header -Server
-	respond "ok" 200
 }
 EOF
 caddy fmt --overwrite /etc/caddy/Caddyfile >/dev/null 2>&1 || true
@@ -1528,6 +1583,8 @@ P_XHTTP = int(os.environ["RW_PORT_REALITY_XHTTP"]); P_HY2 = int(os.environ["RW_P
 P_CDN = int(os.environ["RW_PORT_CDN_LOCAL"]); P_BRIDGE = int(os.environ["RW_PORT_BRIDGE"])
 SNI = os.environ.get("RW_SNI_DONOR", "www.google.com")
 SELF_STEAL = os.environ.get("RW_SELF_STEAL") == "true"
+ENABLE_GRPC = os.environ.get("RW_ENABLE_GRPC", "true") == "true"
+HY2_OBFS = os.environ.get("RW_HY2_OBFS", "")
 # self-steal: неавторизованные подключения Reality отдаёт СВОЕМУ Caddy (сайт с
 # настоящим LE-сертификатом домена). Без PROXY protocol: IP посетителей заглушки
 # нам не нужен, а лишнее звено — лишний шанс сломать handshake Reality.
@@ -1616,14 +1673,17 @@ def reality(key, sid):
 # Рабочий набор (проверено вживую на клиенте Happ): gRPC, Hysteria2,
 # Reality-XHTTP, + CDN-XHTTP через Yandex. Reality-TCP+Vision убран целиком —
 # не поднимается ни в одном клиенте.
-inbounds = [
-    # gRPC + Reality — проверено, работает везде
-    {"tag": T_GRPC, "port": P_GRPC, "listen": LISTEN6, "protocol": "vless",
-     "settings": {"clients": [], "decryption": "none"},
-     "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
-     "streamSettings": {"network": "grpc", "security": "reality",
-                        "grpcSettings": {"serviceName": "grpc"},
-                        "realitySettings": reality(grpc_key, grpc_sid)}},
+inbounds = []
+if ENABLE_GRPC:
+    # gRPC + Reality (устаревший транспорт; по умолчанию не ставим при self-steal)
+    inbounds.append(
+        {"tag": T_GRPC, "port": P_GRPC, "listen": LISTEN6, "protocol": "vless",
+         "settings": {"clients": [], "decryption": "none"},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
+         "streamSettings": {"network": "grpc", "security": "reality",
+                            "grpcSettings": {"serviceName": "grpc"},
+                            "realitySettings": reality(grpc_key, grpc_sid)}})
+inbounds += [
     # Hysteria2 — из покупного (серт файлом, alpn h3); нужен UDP-порт открыт
     {"tag": T_HY2, "port": P_HY2, "listen": LISTEN6, "protocol": "hysteria",
      "settings": {"clients": [], "version": 2}, "sniffing": SNIFF,
@@ -1638,6 +1698,14 @@ inbounds = [
                         "realitySettings": reality(xhttp_key, xhttp_sid),
                         "xhttpSettings": {"path": xhttp_path, "mode": "auto", "xPaddingBytes": "100-1000"}}},
 ]
+# Salamander для Hysteria2. Пароль лежит ТОЛЬКО в инбаунде: Remnawave сам берёт
+# streamSettings.finalmask инбаунда и отдаёт клиентам (ссылка obfs=salamander&obfs-password=…
+# и finalmask в Xray JSON) — отдельно в хосте его прописывать не нужно.
+if HY2_OBFS:
+    for _ib in inbounds:
+        if _ib["tag"] == T_HY2:
+            _ib["streamSettings"]["finalmask"] = {
+                "udp": [{"type": "salamander", "settings": {"password": HY2_OBFS}}]}
 # CDN-XHTTP через Yandex — из покупного (главный инбаунд под обход DPI)
 if ENABLE_CDN:
     inbounds.append(
@@ -1681,7 +1749,7 @@ if EXIT_FILE and os.path.exists(EXIT_FILE):
                                 "users": [{"id": ex["uuid"], "encryption": "none"}]}]},
         "streamSettings": {"network": "xhttp", "security": "reality",
             "realitySettings": {"serverName": ex["sni"], "publicKey": ex["publicKey"],
-                                "shortId": ex["shortId"], "fingerprint": "chrome"},
+                                "shortId": ex["shortId"], "fingerprint": "random"},
             "xhttpSettings": {"path": ex["path"], "mode": "auto"}}})
     # RU — напрямую с входа (российский IP), если включено; остальное — в выход.
     if os.environ.get("RW_ENTRY_RU_DIRECT") == "true":
@@ -1746,7 +1814,7 @@ PROFILE_UUID = prof["uuid"]
 tag_uuid = {ib["tag"]: ib["uuid"] for ib in prof["inbounds"]}
 elog(f"      Профиль: {PROFILE_UUID}")
 
-active_tags = [T_GRPC, T_XHTTP, T_HY2]
+active_tags = ([T_GRPC] if ENABLE_GRPC else []) + [T_XHTTP, T_HY2]
 if ENABLE_CDN: active_tags.append(T_CDN)
 if ENABLE_BRIDGE: active_tags.append(T_BRIDGE)
 active_uuids = [tag_uuid[t] for t in active_tags]
@@ -1826,18 +1894,70 @@ elog(f"      Нода: {NODE_UUID}")
 
 elog("[5/7] Создаю хосты...")
 created = {}
+# Шаблон Xray JSON для хостов входа: госсайты — напрямую с устройства клиента.
+# Если шаблон с таким именем уже есть — берём его как есть (его могли дописать
+# руками), иначе создаём.
+CASCADE_TPL_JSON = {
+    "dns": {"servers": ["1.1.1.1", "8.8.8.8"], "queryStrategy": "UseIP"},
+    "routing": {
+        "domainStrategy": "IPIfNonMatch", "domainMatcher": "hybrid",
+        "rules": [
+            {"protocol": ["bittorrent"], "outboundTag": "direct"},
+            {"ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
+                    "169.254.0.0/16", "100.64.0.0/10", "fc00::/7", "fe80::/10", "::1/128"],
+             "outboundTag": "direct"},
+            {"domain": ["domain:gosuslugi.ru", "domain:gu-st.ru", "domain:gov.ru"],
+             "outboundTag": "direct"},
+            {"network": "tcp,udp", "outboundTag": "proxy"},
+        ]},
+    "inbounds": [
+        {"tag": "socks", "port": 10808, "listen": "127.0.0.1", "protocol": "socks",
+         "settings": {"udp": True, "auth": "noauth"},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
+        {"tag": "http", "port": 10809, "listen": "127.0.0.1", "protocol": "http",
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}}],
+    "outbounds": [{"tag": "direct", "protocol": "freedom"},
+                  {"tag": "block", "protocol": "blackhole"}],
+}
+TPL_UUID = None
+TPL_NAME = os.environ.get("RW_CASCADE_TEMPLATE", "")
+if EXIT_FILE and TPL_NAME:
+    r = api("GET", "/api/subscription-templates", fatal=False)
+    tpls = [] if "__error__" in r else ((r.get("response") or {}).get("templates") or [])
+    hit = next((t for t in tpls if t.get("templateType") == "XRAY_JSON" and t.get("name") == TPL_NAME), None)
+    if hit:
+        TPL_UUID = hit["uuid"]
+        elog(f"  Шаблон «{TPL_NAME}» уже есть — привязываю к хостам как есть.")
+    else:
+        c = api("POST", "/api/subscription-templates", {"name": TPL_NAME, "templateType": "XRAY_JSON"}, fatal=False)
+        if "__error__" in c:
+            elog(f"  [WARN] шаблон «{TPL_NAME}» не создан: {c['__error__']}")
+        else:
+            uuid_ = (c.get("response") or {}).get("uuid")
+            u = api("PATCH", "/api/subscription-templates", {"uuid": uuid_, "templateJson": CASCADE_TPL_JSON}, fatal=False)
+            if "__error__" in u:
+                elog(f"  [WARN] шаблон создан, но не заполнен: {u['__error__']}")
+            else:
+                TPL_UUID = uuid_
+                elog(f"  Создан шаблон «{TPL_NAME}» (госсайты — напрямую с устройства).")
+
 def mkhost(tag, payload):
     payload["inbound"] = {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_uuid[tag]}
+    if TPL_UUID:
+        payload["xrayJsonTemplateUuid"] = TPL_UUID
     r = api("POST", "/api/hosts", payload, fatal=False)
     if "__error__" in r:
         elog(f"      [WARN] {tag}: хост не создан — {r['__error__']}")
         return
     created[tag] = r["response"]["uuid"]; elog(f"      {tag} -> {r['response']['uuid']}")
 
-mkhost(T_GRPC, {"remark": remark("Reality gRPC"), "address": NODE_DOMAIN, "port": P_GRPC,
-    "sni": SNI, "path": "grpc", "alpn": "h2", "fingerprint": "chrome", "securityLayer": "DEFAULT"})
+# fingerprint "random": статичный "chrome" на всех хостах — один и тот же JA4 у всех
+# наших серверов, по нему установку легко опознать. random меняет браузер на каждое соединение.
+if ENABLE_GRPC:
+    mkhost(T_GRPC, {"remark": remark("Reality gRPC"), "address": NODE_DOMAIN, "port": P_GRPC,
+        "sni": SNI, "path": "grpc", "alpn": "h2", "fingerprint": "random", "securityLayer": "DEFAULT"})
 mkhost(T_XHTTP, {"remark": remark("Reality XHTTP"), "address": NODE_DOMAIN, "port": P_XHTTP,
-    "sni": SNI, "path": xhttp_path, "alpn": "h2,http/1.1", "fingerprint": "chrome", "securityLayer": "DEFAULT"})
+    "sni": SNI, "path": xhttp_path, "alpn": "h2,http/1.1", "fingerprint": "random", "securityLayer": "DEFAULT"})
 mkhost(T_HY2, {"remark": remark("Hysteria2"), "address": NODE_DOMAIN, "port": P_HY2,
     "sni": NODE_DOMAIN, "alpn": "h3", "fingerprint": "random", "securityLayer": "TLS"})
 if ENABLE_CDN:
@@ -1940,7 +2060,7 @@ NODE_ADDRESS="${PUBLIC_IP:-$NODE_DOMAIN}"
 log "Создаю профиль, ноду и хосты в панели..."
 env RW_RESULT_FILE="$WORK_DIR/result.json" RW_CDN_HOST_NAME="$CDN_HOST_NAME" \
   RW_WARP_MODE="$WARP_MODE" RW_WARP_OUTBOUND="$WARP_OUTBOUND_FILE" RW_WARP_DOMAINS="$WARP_DOMAINS" \
-  RW_EXIT_FILE="$EXIT_FILE" RW_ENTRY_RU_DIRECT="$ENTRY_RU_DIRECT" RW_ENTRY_EXTRA_DIRECT="$ENTRY_EXTRA_DIRECT" RW_GEO_CATRU="${GEO_HAS_CATRU:-true}" RW_SID_BRIDGE="$(openssl rand -hex 8)" RW_BRIDGE_PATH="/$(openssl rand -hex 8)/" \
+  RW_EXIT_FILE="$EXIT_FILE" RW_ENTRY_RU_DIRECT="$ENTRY_RU_DIRECT" RW_ENTRY_EXTRA_DIRECT="$ENTRY_EXTRA_DIRECT" RW_CASCADE_TEMPLATE="$CASCADE_TEMPLATE" RW_GEO_CATRU="${GEO_HAS_CATRU:-true}" RW_SID_BRIDGE="$(openssl rand -hex 8)" RW_BRIDGE_PATH="/$(openssl rand -hex 8)/" \
   RW_NODE_NAME="$NODE_NAME" RW_NODE_DOMAIN="$NODE_DOMAIN" RW_NODE_ADDRESS="$NODE_ADDRESS" \
   RW_NODE_PORT="$NODE_PORT" RW_HOST_PREFIX="$HOST_PREFIX" RW_TAG_SUFFIX="$TAG_SUFFIX" \
   RW_SNI_DONOR="$SNI_DONOR" RW_SELF_STEAL="$SELF_STEAL" RW_PORT_SS_LOCAL="$PORT_SS_LOCAL" RW_ENABLE_CDN="$ENABLE_CDN" RW_ENABLE_BRIDGE="$ENABLE_BRIDGE" \
@@ -1949,6 +2069,7 @@ env RW_RESULT_FILE="$WORK_DIR/result.json" RW_CDN_HOST_NAME="$CDN_HOST_NAME" \
   RW_CDN_PUBLIC_DOMAIN="$CDN_PUBLIC_DOMAIN" RW_CDN_PATH="$CDN_PATH" \
   RW_PORT_REALITY_GRPC="$PORT_REALITY_GRPC" \
   RW_PORT_REALITY_XHTTP="$PORT_REALITY_XHTTP" RW_PORT_HY2="$PORT_HY2" \
+  RW_ENABLE_GRPC="$ENABLE_GRPC" RW_HY2_OBFS="$HY2_OBFS" \
   RW_PORT_CDN_LOCAL="$PORT_CDN_LOCAL" RW_PORT_BRIDGE="$PORT_BRIDGE" \
   RW_SID_GRPC="$(openssl rand -hex 8)" \
   RW_SID_XHTTP="$(openssl rand -hex 8)" RW_XHTTP_PATH="/$(openssl rand -hex 8)/" \
@@ -2009,7 +2130,9 @@ step "Фаервол"
 # ---------------------------------------------------------------------------
 # Firewall — политика drop совместима (правила в существующую inet filter input)
 # ---------------------------------------------------------------------------
-FW_TCP="$(printf '%s\n' "$PORT_REALITY_GRPC" "$PORT_REALITY_XHTTP" 80 443 8443 | sort -un | paste -sd, - | sed 's/,/, /g')"
+FW_PORTS=("$PORT_REALITY_XHTTP" 80 443)
+[[ "$ENABLE_GRPC" == "true" ]] && FW_PORTS+=("$PORT_REALITY_GRPC")
+FW_TCP="$(printf '%s\n' "${FW_PORTS[@]}" | sort -un | paste -sd, - | sed 's/,/, /g')"
 # IP входных нод хранятся в файле — новый вход добавляется одной строкой
 # без переустановки: echo IP >> $PEERS_FILE && /usr/local/bin/rw-node-firewall.sh
 PEERS_FILE="$NODE_DIR/bridge-peers"
@@ -2017,10 +2140,15 @@ BRIDGE_RULES=""
 if [[ "$ENABLE_BRIDGE" == "true" ]]; then
   : > "$PEERS_FILE"
   for ip in $BRIDGE_PEERS; do printf '%s\n' "$ip" >> "$PEERS_FILE"; done
+  # Файл пуст — порт моста ЗАКРЫТ (кроме явного any): так мост не виден сканерам.
   BRIDGE_RULES="if [ -s $PEERS_FILE ]; then
-  while read -r ip; do [ -n \"\$ip\" ] && nft insert rule inet filter input ip saddr \"\$ip\" tcp dport $PORT_BRIDGE accept comment \"rw-node-bridge\"; done < $PEERS_FILE
+  while read -r ip; do [ -n \"\$ip\" ] && nft insert rule inet filter input ip saddr \"\$ip\" tcp dport $PORT_BRIDGE accept comment \"rw-node-bridge\"; done < $PEERS_FILE"
+  if [[ "$BRIDGE_ANY" == "true" ]]; then
+    BRIDGE_RULES="$BRIDGE_RULES
 else
-  nft insert rule inet filter input tcp dport $PORT_BRIDGE accept comment \"rw-node-bridge\"
+  nft insert rule inet filter input tcp dport $PORT_BRIDGE accept comment \"rw-node-bridge\""
+  fi
+  BRIDGE_RULES="$BRIDGE_RULES
 fi"
 fi
 
@@ -2106,16 +2234,17 @@ EOF
   systemctl enable rw-node-firewall.service >/dev/null 2>&1 || true
 elif [[ "$FW_KIND" == "ufw" ]]; then
   log "Открываю порты в ufw..."
-  for p in $(printf '%s\n' "$PORT_REALITY_GRPC" "$PORT_REALITY_XHTTP" 80 443 8443 | sort -un); do ufw allow "$p"/tcp >/dev/null 2>&1 || true; done
+  for p in $(printf '%s\n' "${FW_PORTS[@]}" | sort -un); do ufw allow "$p"/tcp >/dev/null 2>&1 || true; done
   ufw allow "$PORT_HY2"/udp >/dev/null 2>&1 || true
   if [[ -n "$PANEL_IP" ]]; then ufw allow from "$PANEL_IP" to any port "$NODE_PORT" proto tcp >/dev/null 2>&1 || true
   else ufw allow "$NODE_PORT"/tcp >/dev/null 2>&1 || true; fi
   if [[ "$ENABLE_BRIDGE" == "true" ]]; then
     if [[ -n "$BRIDGE_PEERS" ]]; then for ip in $BRIDGE_PEERS; do ufw allow from "$ip" to any port "$PORT_BRIDGE" proto tcp >/dev/null 2>&1 || true; done
-    else ufw allow "$PORT_BRIDGE"/tcp >/dev/null 2>&1 || true; fi
+    elif [[ "$BRIDGE_ANY" == "true" ]]; then ufw allow "$PORT_BRIDGE"/tcp >/dev/null 2>&1 || true; fi
   fi
 else
   warn "Сервер без фаервола: все порты открыты. NODE_PORT $NODE_PORT защищён только SECRET_KEY."
+  [[ "$ENABLE_BRIDGE" == "true" ]] && warn "Порт моста $PORT_BRIDGE тоже открыт всем — без фаервола ограничить его по IP нельзя."
 fi
 
 
@@ -2190,26 +2319,35 @@ if [[ "$NODE_ROLE" == "entry" ]]; then
   [[ "$ENTRY_RU_DIRECT" == "true" ]] && _rd="RU-сайты напрямую ($ENTRY_CC), остальное → выход"
   kv "Каскад" "$_rd"
   [[ -n "${ENTRY_EXTRA_LABELS:-}" ]] && kv "Напрямую" "$ENTRY_EXTRA_LABELS"
+  [[ -n "${CASCADE_TEMPLATE:-}" ]] && kv "Шаблон хостов" "$CASCADE_TEMPLATE — госсайты напрямую с устройства клиента"
 fi
 printf '  %s╰─%s\n' "$C_MAG" "$C_RST"
 
 printf '\n  %s╭─ Инбаунды%s\n' "$C_MAG" "$C_RST"
-kv "Reality gRPC"  "TCP $PORT_REALITY_GRPC"
+[[ "$ENABLE_GRPC" == "true" ]] && kv "Reality gRPC" "TCP $PORT_REALITY_GRPC"
 kv "Reality XHTTP" "TCP $PORT_REALITY_XHTTP$([[ "$SELF_STEAL" == "true" ]] && echo "  (self-steal, сайт-заглушка за ним)")"
-kv "Hysteria2"     "UDP $PORT_HY2  (UDP должен быть открыт у хостера)"
+kv "Hysteria2"     "UDP $PORT_HY2$([[ -n "$HY2_OBFS" ]] && echo " · salamander")  (UDP должен быть открыт у хостера)"
 [[ "$ENABLE_CDN" == "true" ]]    && kv "CDN XHTTP" "Yandex CDN → Caddy → 127.0.0.1:$PORT_CDN_LOCAL"
 [[ "$ENABLE_BRIDGE" == "true" ]] && kv "Мост" "TCP $PORT_BRIDGE · VLESS+Reality+XHTTP · только сервисный юзер"
 printf '  %s╰─%s\n' "$C_MAG" "$C_RST"
+
+if [[ "$NODE_ROLE" == "entry" && -n "$PUBLIC_IP" ]]; then
+  printf '\n  %s╭─ На выходной ноде (%s)%s\n' "$C_BLU" "$EXIT_NAME" "$C_RST"
+  kv "Если мост закрыт" "порт $PORT_BRIDGE ограничен по IP — разреши этот вход:"
+  kv ""                 "echo $PUBLIC_IP >> /opt/remnanode/bridge-peers && /usr/local/bin/rw-node-firewall.sh"
+  printf '  %s╰─%s\n' "$C_BLU" "$C_RST"
+fi
 
 if [[ "$ENABLE_BRIDGE" == "true" ]]; then
   printf '\n  %s╭─ Каскад: эта нода — выход%s\n' "$C_BLU" "$C_RST"
   kv "Дальше" "поставь входную ноду этим же скриптом, роль 2 —"
   kv ""       "она сама найдёт этот выход в панели"
   if [[ -n "$BRIDGE_PEERS" ]]; then kv "Порт моста" "$PORT_BRIDGE открыт только для: $BRIDGE_PEERS"
-  else kv "Порт моста" "$PORT_BRIDGE открыт всем (защищён Reality + UUID)"; fi
-  if [[ -n "$BRIDGE_PEERS" && "$FW_KIND" == "nft" ]]; then
+  elif [[ "$BRIDGE_ANY" == "true" ]]; then kv "Порт моста" "$PORT_BRIDGE открыт всем (защищён Reality + UUID)"
+  else kv "Порт моста" "$PORT_BRIDGE ЗАКРЫТ — добавь IP входной ноды (команда ниже)"; fi
+  if [[ "$FW_KIND" == "nft" ]]; then
     kv "Новый вход" "echo IP >> $PEERS_FILE && /usr/local/bin/rw-node-firewall.sh"
-  elif [[ -n "$BRIDGE_PEERS" && "$FW_KIND" == "ufw" ]]; then
+  elif [[ "$FW_KIND" == "ufw" ]]; then
     kv "Новый вход" "ufw allow from IP to any port $PORT_BRIDGE proto tcp"
   fi
   printf '  %s╰─%s\n' "$C_BLU" "$C_RST"
