@@ -84,7 +84,7 @@ main() {
   while read -r net port; do
     [[ -n "${port:-}" && "$port" != "$NODE_PORT" ]] || continue
     case "$net" in tcp) TCP_PORTS+=("$port") ;; udp) UDP_PORTS+=("$port") ;; esac
-  done < <(ss -H -tulnp 2>/dev/null | awk '{loc=$5; if (loc !~ /^(0\.0\.0\.0|\*|\[::\]):[0-9]+$/) next; if ($NF !~ /rw-core|xray|caddy|nginx/) next; n=split(loc,a,":"); print $1, a[n]}' | sort -u)
+  done < <(ss -H -tulnp 2>/dev/null | awk '{loc=$5; if (loc !~ /^(0\.0\.0\.0|\*|\[::\]):[0-9]+$/) next; if ($NF !~ /rw-core|xray|caddy|nginx|haproxy/) next; n=split(loc,a,":"); print $1, a[n]}' | sort -u)
   TCP_PORTS+=(80)   # выпуск/продление сертификата Let's Encrypt (HTTP-01) и 301 на https
 
   # --- мост каскада ---
