@@ -648,29 +648,30 @@ ok "Токен рабочий."
 # Сохраним токен для повторных прогонов (chmod 600).
 ( umask 077; printf '%s\n' "$API_TOKEN" > "$TOKEN_FILE" )
 
-# Версия xray в образе ноды -> minClientVer (отсекает старые Reality-клиенты).
-# Можно задать руками: MIN_CLIENT_VER=26.7.28 bash remnanode-deploy.sh
-# (MIN_CLIENT_VER=none — не ограничивать).
+# minClientVer по умолчанию НЕ задаём: сам Xray предупреждает в логе, что его смена
+# повышает вероятность блокировки (отклонение от умолчаний Reality заметно зондам).
+#   MIN_CLIENT_VER=auto     — взять версию ядра из образа ноды
+#   MIN_CLIENT_VER=26.7.28  — задать вручную
 spin "Скачиваю образ ноды $NODE_IMAGE" docker pull "$NODE_IMAGE" \
   || warn "docker pull не прошёл — попробую с тем, что есть."
-if [[ -n "${MIN_CLIENT_VER:-}" ]]; then
-  [[ "$MIN_CLIENT_VER" == "none" ]] && MIN_CLIENT_VER=""
-  log "minClientVer задан вручную: ${MIN_CLIENT_VER:-без ограничения}"
-  _ver="manual"
-else
-MIN_CLIENT_VER="26.7.28"   # фолбэк, если не удалось определить
-log "Определяю версию Xray в образе ноды (для minClientVer)..."
-# || true обязателен: при set -o pipefail пустой grep иначе молча роняет скрипт.
-_ver=$(docker run --rm --entrypoint /usr/local/bin/xray "$NODE_IMAGE" version 2>/dev/null \
-  | grep -oE 'Xray [0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk '{print $2}' || true)
-fi
-if [[ "$_ver" == "manual" ]]; then
-  :
-elif [[ "$_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  MIN_CLIENT_VER="$_ver"; log "minClientVer = $MIN_CLIENT_VER (ядро ноды)."
-else
-  warn "Не определил версию Xray — беру minClientVer=$MIN_CLIENT_VER по умолчанию."
-fi
+case "${MIN_CLIENT_VER:-}" in
+  ""|none)
+    MIN_CLIENT_VER=""
+    ok "minClientVer не задаётся (умолчания Reality — меньше отличий для сканеров)."
+    ;;
+  auto)
+    log "Определяю версию Xray в образе ноды (для minClientVer)..."
+    # || true обязателен: при set -o pipefail пустой grep иначе молча роняет скрипт.
+    _ver=$(docker run --rm --entrypoint /usr/local/bin/xray "$NODE_IMAGE" version 2>/dev/null \
+      | grep -oE 'Xray [0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk '{print $2}' || true)
+    if [[ "$_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then MIN_CLIENT_VER="$_ver"; log "minClientVer = $MIN_CLIENT_VER (ядро ноды)."
+    else MIN_CLIENT_VER=""; warn "Не определил версию Xray — minClientVer не задаю."; fi
+    ;;
+  *)
+    if [[ "$MIN_CLIENT_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then log "minClientVer задан вручную: $MIN_CLIENT_VER"
+    else warn "MIN_CLIENT_VER=«$MIN_CLIENT_VER» — не версия, игнорирую."; MIN_CLIENT_VER=""; fi
+    ;;
+esac
 
 
 step "Сквады и каскад"
@@ -1185,6 +1186,7 @@ cat > /etc/caddy/Caddyfile <<EOF
 
 (decoy) {
 	header -Server
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	root * /var/www/html
 	handle /health {
 		header Content-Type application/json
@@ -1196,7 +1198,9 @@ $CADDY_CDN_BLOCK
 	}
 }
 
-http://$NODE_DOMAIN {
+# 301 на ЛЮБОЙ хост (в т.ч. запрос по голому IP — так ходят сканеры). Порт 80 нужен
+# для выпуска/продления сертификата (HTTP-01 Caddy обрабатывает раньше этих правил).
+http:// {
 	redir https://{host}{uri} permanent
 }
 
@@ -1659,11 +1663,11 @@ CDN_XHTTP = {
 }
 SNIFF = {"enabled": True, "destOverride": ["http", "tls", "quic"]}
 
-MIN_CLIENT_VER = os.environ.get("RW_MIN_CLIENT_VER", "26.7.28")
+MIN_CLIENT_VER = os.environ.get("RW_MIN_CLIENT_VER", "")
 
 def reality(key, sid):
-    # minClientVer — только Reality: отсекает старые xray-клиенты (иначе их
-    # неудачные попытки временно роняют инбаунд). Значение = ядро ноды.
+    # minClientVer — только если задан явно (MIN_CLIENT_VER): Xray сам предупреждает,
+    # что его использование повышает вероятность блокировки.
     r = {"dest": R_DEST, "show": False, "xver": R_XVER,
          "shortIds": [sid], "privateKey": key, "serverNames": [SNI]}
     if MIN_CLIENT_VER:
@@ -2166,11 +2170,31 @@ if [[ "$FW_KIND" == "none" ]] && command -v nft >/dev/null 2>&1; then
   echo "  Могу включить базовый nftables: входящее закрыто, кроме SSH ($SSH_PORTS) и портов ноды."
   flush_input
   read -rp "${Q}Включить базовый фаервол? [Y/n]: " _fw
+  if is_no "$_fw"; then
+    warn "Без фаервола порт ноды $NODE_PORT и SSH открыты всему интернету, а порт моста нельзя ограничить по IP."
+    read -rp "${Q}Точно оставить сервер без фаервола? [y/N]: " _fw2
+    if is_yes "$_fw2"; then _fw="n"; else _fw="y"; fi
+  fi
   if ! is_no "$_fw"; then
+    # SSH только с твоего IP — по желанию (по умолчанию нет: при смене IP зайти можно будет лишь через консоль хостера).
+    SSH_RULE="tcp dport { $SSH_PORTS } accept comment \"ssh\""
+    _sship="${SSH_CLIENT:-}"; _sship="${_sship%% *}"
+    if [[ -n "$_sship" ]] && is_ip "$_sship"; then
+      echo "  SSH сейчас открыт любому. Могу пустить его только с твоего IP ($_sship)."
+      echo "  Если IP сменится — зайти можно только через консоль хостера."
+      read -rp "${Q}Ограничить SSH до $_sship? [y/N]: " _sr
+      if is_yes "$_sr"; then
+        if [[ "$_sship" == *:* ]]; then SSH_RULE="ip6 saddr $_sship tcp dport { $SSH_PORTS } accept comment \"ssh\""
+        else SSH_RULE="ip saddr $_sship tcp dport { $SSH_PORTS } accept comment \"ssh\""; fi
+      fi
+    fi
+    # Таблица ТОЛЬКО своя: «flush ruleset» снёс бы таблицы Docker и самой ноды (ip remnanode).
     cat > /etc/nftables.conf <<EOF
 #!/usr/sbin/nft -f
 # Базовый фаервол от remnanode-deploy.sh. Порты ноды добавляет rw-node-firewall.service.
-flush ruleset
+# Без "flush ruleset": чужие таблицы (Docker, remnanode) не трогаем.
+table inet filter
+delete table inet filter
 table inet filter {
   chain input {
     type filter hook input priority 0; policy drop;
@@ -2178,16 +2202,14 @@ table inet filter {
     ct state invalid drop
     iif lo accept
     meta l4proto { icmp, ipv6-icmp } accept
-    tcp dport { $SSH_PORTS } accept comment "ssh"
+    udp sport 67 udp dport 68 accept
+    udp sport 547 udp dport 546 accept
+    $SSH_RULE
   }
-  chain forward { type filter hook forward priority 0; policy accept; }
-  chain output  { type filter hook output priority 0; policy accept; }
 }
 EOF
     if nft -c -f /etc/nftables.conf && nft -f /etc/nftables.conf; then
       systemctl enable nftables >/dev/null 2>&1 || true
-      # Docker кладёт свои правила в iptables(-nft) — после flush перезапускаем.
-      systemctl restart docker >/dev/null 2>&1 || true
       FW_KIND="nft"; ok "Базовый nftables включён (SSH: $SSH_PORTS)."
     else
       warn "Не смог применить базовый nftables — оставляю без фаервола."
