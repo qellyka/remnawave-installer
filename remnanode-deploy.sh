@@ -15,6 +15,9 @@
 #   - каскад: выходная нода получает мост BRIDGE_IN (VLESS+Reality+XHTTP) и
 #     сервисного пользователя; входная нода (роль "entry") подключается к
 #     выбранному выходу, RU-сайты отпускает напрямую, остальное шлёт в выход;
+#   - разводка по SNI: HAProxy на 443 читает имя сайта в ClientHello (TLS не
+#     расшифровывает) и раздаёт TCP-потоки транспортам (XHTTP, gRPC, мост) —
+#     снаружи один порт 443, остальные порты закрыты;
 #   - маскировка Reality: self-steal (SNI = свой домен, Reality на 443,
 #     сайт-заглушка за ним через PROXY protocol) или чужой SNI-донор;
 #   - создаёт хосты с именами вида "🇩🇪 DE | Reality gRPC", добавляет
@@ -41,7 +44,7 @@ else
   UI_TTY=0; C_RST=""; C_B=""; C_DIM=""; C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_MAG=""; C_CYN=""
 fi
 LOG_FILE="/var/log/remnanode-deploy.log"
-STEP_N=0; STEP_TOTAL=11
+STEP_N=0; STEP_TOTAL=12
 Q="  ${C_MAG}?${C_RST} "          # префикс вопросов
 
 log()  { printf '  %s›%s %s\n' "$C_CYN" "$C_RST" "$*"; }
@@ -147,6 +150,13 @@ HY2_OBFS=""            # пароль salamander; пусто = без обфус
 PORT_CDN_LOCAL=4443    # xray слушает localhost, наружу через Caddy
 PORT_BRIDGE=8888       # BRIDGE_IN, server-side routing (между нодами)
 PORT_SS_LOCAL=9443     # self-steal: Caddy слушает 127.0.0.1 за Reality
+# Разводка по SNI: HAProxy держит 443, транспорты Xray уходят на loopback.
+PORT_RT_XHTTP=10443
+PORT_RT_GRPC=10444
+PORT_RT_BRIDGE=10445
+USE_ROUTER=false
+XHTTP_SNI=""; GRPC_SNI=""; BRIDGE_SNI=""   # имена, по которым роутер выбирает транспорт
+ROUTER_NAMES=()                            # поддомены, которым нужны A-запись и сертификат
 # Порт API ноды (панель <-> нода). Пусто = случайный (выбирается после установки
 # пакетов): стандартный 2222 сканеры ищут как признак ноды Remnawave.
 NODE_PORT="${NODE_PORT:-}"
@@ -290,19 +300,6 @@ if [[ "$NODE_ROLE" == "exit" ]]; then
   read -rp "${Q}Включить BRIDGE_IN? [y/N]: " BRIDGE_ANS
   if is_yes "$BRIDGE_ANS"; then
     ENABLE_BRIDGE=true
-    echo "  IP входных нод, которым разрешён порт $PORT_BRIDGE (через пробел)."
-    echo "  Enter — порт закрыт для всех, пока не добавишь IP (команда будет в итоге)."
-    echo "  any — открыть всем (не рекомендую: мост виден любому сканеру)."
-    while true; do
-      read -rp "${Q}IP входных нод: " BRIDGE_PEERS
-      BRIDGE_PEERS="$(printf '%s' "$BRIDGE_PEERS" | tr ',;' '  ')"
-      if [[ "$(printf '%s' "$BRIDGE_PEERS" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" == "any" ]]; then
-        BRIDGE_ANY=true; BRIDGE_PEERS=""; break
-      fi
-      _bad=""; for ip in $BRIDGE_PEERS; do is_ip "$ip" || _bad="$ip"; done
-      [[ -z "$_bad" ]] && break
-      warn "«$_bad» — не IP-адрес. Введи IP через пробел, any или Enter."
-    done
   fi
 fi
 
@@ -371,7 +368,7 @@ hr
 echo "  Reality gRPC — устаревший транспорт (сам Xray просит перейти на XHTTP),"
 echo "  занимает отдельный порт $PORT_REALITY_GRPC: у обычного сайта таких портов нет."
 echo "    1) включить   2) не ставить — только XHTTP на 443"
-_g_def=1; [[ "$SELF_STEAL" == "true" ]] && _g_def=2
+_g_def=2   # по умолчанию не ставим: устаревший транспорт + отдельный порт вне SNI-роутера
 while true; do
   flush_input
   read -rp "${Q}gRPC [1/2, Enter — $_g_def]: " _g
@@ -397,6 +394,84 @@ HY2_OBFS=""
 if [[ "$_o" == "1" ]]; then
   if command -v openssl >/dev/null 2>&1; then HY2_OBFS="$(openssl rand -hex 12)"
   else HY2_OBFS="$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"; fi
+fi
+
+rand_label() {  # правдоподобное имя поддомена: <слово>-<4 hex>
+  local w=(api cdn static media assets files img app edge data dl cache)
+  printf '%s-%s' "${w[RANDOM % ${#w[@]}]}" "$(head -c 2 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+}
+
+hr
+echo "  Разводка по SNI — все TCP-транспорты на ОДНОМ порту 443."
+echo "  Перед Xray встаёт HAProxy: читает имя сайта (SNI) из ClientHello и, не расшифровывая"
+echo "  TLS, пересылает поток нужному транспорту. Снаружи один порт 443, как у обычного"
+echo "  сайта, остальные порты закрыты. Скорость не страдает: роутер только пересылает байты."
+echo "    1) да (рекомендуется)   2) нет — отдельные порты, как раньше"
+while true; do
+  flush_input
+  read -rp "${Q}Разводка по SNI [1/2, Enter — 1]: " _rt
+  _rt=$(printf '%s' "$_rt" | tr -d '[:space:]'); _rt="${_rt:-1}"
+  [[ "$_rt" == "1" || "$_rt" == "2" ]] && break
+  warn "Введи 1 или 2."
+done
+[[ "$_rt" == "1" ]] && USE_ROUTER=true
+
+if [[ "$USE_ROUTER" == "true" ]]; then
+  if [[ "$SELF_STEAL" != "true" ]]; then
+    echo "  С SNI-донором XHTTP переедет на 443 (SNI = донор), а свой домен остаётся за сайтом-заглушкой."
+    echo "  gRPC и мост (если включены) останутся на своих портах: имён доноров на всех не хватит."
+  elif [[ "$ENABLE_GRPC" == "true" || "$ENABLE_BRIDGE" == "true" ]]; then
+    echo "  Каждому транспорту нужен свой поддомен $NODE_DOMAIN (по нему роутер выбирает, куда"
+    echo "  отправить соединение). Нужна A-запись на этот сервер — или одна *.$NODE_DOMAIN на все."
+    echo "    1) случайные имена   2) свои"
+    while true; do
+      flush_input
+      read -rp "${Q}Поддомены [1/2, Enter — 1]: " _nm
+      _nm=$(printf '%s' "$_nm" | tr -d '[:space:]'); _nm="${_nm:-1}"
+      [[ "$_nm" == "1" || "$_nm" == "2" ]] && break
+      warn "Введи 1 или 2."
+    done
+    name_for() {  # $1 — название транспорта; печатает полное имя
+      local lab full
+      while true; do
+        lab=""
+        if [[ "$_nm" == "2" ]]; then
+          read -rp "${Q}Поддомен для $1 (например static; Enter — случайный): " lab
+          lab=$(printf '%s' "$lab" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        fi
+        [[ -n "$lab" ]] || lab="$(rand_label)"
+        if [[ "$lab" == *.* ]]; then full="$lab"; else full="$lab.$NODE_DOMAIN"; fi
+        if [[ "$full" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9-]{2,}$ ]] \
+           && [[ "$full" != "$NODE_DOMAIN" && "$full" != "$GRPC_SNI" && "$full" != "$BRIDGE_SNI" ]]; then
+          printf '%s' "$full"; return 0
+        fi
+        warn "«$lab» не подходит (формат или имя уже занято) — введи другое." >&2
+        [[ "$_nm" == "2" ]] || return 1
+      done
+    }
+    [[ "$ENABLE_GRPC" == "true" ]] && GRPC_SNI="$(name_for gRPC)"
+    [[ "$ENABLE_BRIDGE" == "true" ]] && BRIDGE_SNI="$(name_for "моста каскада")"
+    [[ -n "$GRPC_SNI" ]] && ROUTER_NAMES+=("$GRPC_SNI")
+    [[ -n "$BRIDGE_SNI" ]] && ROUTER_NAMES+=("$BRIDGE_SNI")
+    for _n in "${ROUTER_NAMES[@]}"; do ok "Поддомен: $_n"; done
+  fi
+fi
+
+# Мост на своём порту (без роутера или с донором) — ограничиваем по IP входных нод.
+if [[ "$ENABLE_BRIDGE" == "true" && -z "$BRIDGE_SNI" ]]; then
+    echo "  IP входных нод, которым разрешён порт $PORT_BRIDGE (через пробел)."
+    echo "  Enter — порт закрыт для всех, пока не добавишь IP (команда будет в итоге)."
+    echo "  any — открыть всем (не рекомендую: мост виден любому сканеру)."
+    while true; do
+      read -rp "${Q}IP входных нод: " BRIDGE_PEERS
+      BRIDGE_PEERS="$(printf '%s' "$BRIDGE_PEERS" | tr ',;' '  ')"
+      if [[ "$(printf '%s' "$BRIDGE_PEERS" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" == "any" ]]; then
+        BRIDGE_ANY=true; BRIDGE_PEERS=""; break
+      fi
+      _bad=""; for ip in $BRIDGE_PEERS; do is_ip "$ip" || _bad="$ip"; done
+      [[ -z "$_bad" ]] && break
+      warn "«$_bad» — не IP-адрес. Введи IP через пробел, any или Enter."
+    done
 fi
 
 hr
@@ -451,14 +526,16 @@ kv "Нода" "$NODE_NAME · $NODE_DOMAIN"
 kv "Маскировка" "$([[ "$SELF_STEAL" == "true" ]] && echo "self-steal (Reality XHTTP на 443)" || echo "SNI-донор")"
 kv "gRPC" "$([[ "$ENABLE_GRPC" == "true" ]] && echo "включён (TCP $PORT_REALITY_GRPC)" || echo "не ставим")"
 kv "Hysteria2" "UDP $PORT_HY2, $([[ -n "$HY2_OBFS" ]] && echo "salamander" || echo "без обфускации")"
+kv "SNI-роутер" "$([[ "$USE_ROUTER" == "true" ]] && echo "HAProxy на 443$([[ ${#ROUTER_NAMES[@]} -gt 0 ]] && echo " · поддомены: ${ROUTER_NAMES[*]}")" || echo "нет — отдельные порты")"
 kv "CDN" "$([[ "$ENABLE_CDN" == "true" ]] && echo "$CDN_PUBLIC_DOMAIN" || echo "нет")"
 kv "WARP" "$WARP_MODE"
 [[ -n "$HOST_PREFIX" ]] && kv "Хосты" "$HOST_PREFIX …"
 printf '  %s╰─%s\n' "$C_MAG" "$C_RST"
 echo "  Проверь перед стартом:"
 echo "    A-запись $NODE_DOMAIN -> IP этого сервера"
+for _n in "${ROUTER_NAMES[@]:-}"; do [[ -n "$_n" ]] && echo "    A-запись $_n -> IP этого сервера (или одна запись *.$NODE_DOMAIN)"; done
 [[ "$ENABLE_CDN" == "true" ]] && echo "  $CDN_PUBLIC_DOMAIN — CNAME на Yandex CDN добавим ПОСЛЕ (инструкция в конце)"
-read -rp "${Q}Enter, когда A-запись для $NODE_DOMAIN готова: "
+read -rp "${Q}Enter, когда A-записи готовы: "
 
 step "Зависимости и Docker"
 # ---------------------------------------------------------------------------
@@ -521,6 +598,13 @@ elif [[ -n "$PUBLIC_IP" && "$RESOLVED" != "$PUBLIC_IP" ]]; then
 else
   ok "DNS в порядке: $NODE_DOMAIN -> $RESOLVED"
 fi
+for _n in "${ROUTER_NAMES[@]:-}"; do
+  [[ -n "$_n" ]] || continue
+  _r=$(dig +short "$_n" A | tail -n1 || true)
+  if [[ -z "$_r" ]]; then warn "$_n не резолвится — сертификат для него не выпустится (нужна A-запись или *.$NODE_DOMAIN)."
+  elif [[ -n "$PUBLIC_IP" && "$_r" != "$PUBLIC_IP" ]]; then warn "$_n -> $_r, а не $PUBLIC_IP."
+  else ok "DNS в порядке: $_n -> $_r"; fi
+done
 # Let's Encrypt предпочитает IPv6: чужая AAAA-запись = провал выпуска.
 RESOLVED6=$(dig +short "$NODE_DOMAIN" AAAA | grep ':' | tail -n1 || true)
 if [[ -n "$RESOLVED6" ]] && ! ip -6 addr 2>/dev/null | grep -qi "${RESOLVED6%%/*}"; then
@@ -818,6 +902,7 @@ ENTRY_CC=""
 ENTRY_RU_DIRECT=false
 ENTRY_EXTRA_DIRECT=""
 CASCADE_TEMPLATE=""
+EXIT_PORT=""
 CASCADE_TEMPLATE_NAME="${CASCADE_TEMPLATE_NAME:-Cascade RU}"   # имя шаблона в панели
 if [[ "$NODE_ROLE" == "entry" ]]; then
   cat > "$WORK_DIR/exits.py" <<'EXITSEOF'
@@ -861,7 +946,8 @@ for p in profs or []:
             print(f"пропускаю {tag}: нет сервисного пользователя {user}", file=sys.stderr); continue
         cc = (node.get("countryCode") or "").upper()
         res.append({"node": node.get("name"), "country": "" if cc == "XX" else cc,
-                    "address": node.get("address"), "port": ib.get("port"),
+                    "address": node.get("address"),
+                    "port": (443 if (ib.get("listen") or "") in ("127.0.0.1", "::1", "localhost") else ib.get("port")),
                     "uuid": u.get("vlessUuid"), "sni": (rs.get("serverNames") or [""])[0],
                     "shortId": (rs.get("shortIds") or [""])[0],
                     "publicKey": pub_from_priv(rs["privateKey"]),
@@ -894,6 +980,7 @@ json.dump(lst[i], open(sys.argv[3], "w"))
 PICKEOF
   EXIT_CC=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['country'])" "$EXIT_FILE")
   EXIT_NAME=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['node'])" "$EXIT_FILE")
+  EXIT_PORT=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['port'])" "$EXIT_FILE")
   if [[ ! "$EXIT_CC" =~ ^[A-Z]{2}$ ]]; then
     read_clean "Код страны выхода $EXIT_NAME (2 буквы): " EXIT_CC 'A-Za-z'
     EXIT_CC="$(echo "$EXIT_CC" | tr '[:lower:]' '[:upper:]' | cut -c1-2)"
@@ -1092,7 +1179,6 @@ step "Caddy: сайт-заглушка и сертификат"
 # смонтирован в контейнер) и перечитывает их раз в час — продление без рестарта.
 # ---------------------------------------------------------------------------
 CDN_PATH="/uploadfiles/"
-CERT_DIR_HOST="$CADDY_CERTS/$CADDY_ISSUER_DIR/$NODE_DOMAIN"
 CERT_FILE_CT="/caddy-certs/$CADDY_ISSUER_DIR/$NODE_DOMAIN/$NODE_DOMAIN.crt"
 KEY_FILE_CT="/caddy-certs/$CADDY_ISSUER_DIR/$NODE_DOMAIN/$NODE_DOMAIN.key"
 
@@ -1138,11 +1224,13 @@ chmod -R a+rX /var/www/html
 
 # self-steal: публичный 443 занимает Reality, сайт Caddy — на 127.0.0.1:9443
 # (Reality отдаёт туда неавторизованные подключения). Иначе — обычный 443.
-if [[ "$SELF_STEAL" == "true" ]]; then
+if [[ "$SELF_STEAL" == "true" || "$USE_ROUTER" == "true" ]]; then
   CADDY_HTTPS_PORT=$PORT_SS_LOCAL; CADDY_SITE_BIND="	bind 127.0.0.1"
 else
   CADDY_HTTPS_PORT=443; CADDY_SITE_BIND=""
 fi
+CADDY_SITES="https://$NODE_DOMAIN"
+for _n in "${ROUTER_NAMES[@]:-}"; do [[ -n "$_n" ]] && CADDY_SITES="$CADDY_SITES, https://$_n"; done
 CADDY_CDN_BLOCK=""
 if [[ "$ENABLE_CDN" == "true" ]]; then
   CADDY_CDN_BLOCK="	handle /uploadfiles {
@@ -1204,7 +1292,7 @@ http:// {
 	redir https://{host}{uri} permanent
 }
 
-https://$NODE_DOMAIN {
+$CADDY_SITES {
 $CADDY_SITE_BIND
 	import decoy
 }
@@ -1215,10 +1303,16 @@ caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >> "$LOG_FILE" 
 systemctl enable caddy >/dev/null 2>&1 || true
 systemctl restart caddy || die "Caddy не запустился — journalctl -u caddy -n 50"
 
-wait_cert() {
-  local i
+wait_cert() {  # ждём сертификаты для домена ноды и всех поддоменов роутера
+  local i n dir ready
   for i in $(seq 1 90); do
-    [[ -s "$CERT_DIR_HOST/$NODE_DOMAIN.crt" && -s "$CERT_DIR_HOST/$NODE_DOMAIN.key" ]] && return 0
+    ready=true
+    for n in "$NODE_DOMAIN" "${ROUTER_NAMES[@]:-}"; do
+      [[ -n "$n" ]] || continue
+      dir="$CADDY_CERTS/$CADDY_ISSUER_DIR/$n"
+      [[ -s "$dir/$n.crt" && -s "$dir/$n.key" ]] || ready=false
+    done
+    [[ "$ready" == "true" ]] && return 0
     sleep 2
   done
   return 1
@@ -1265,6 +1359,61 @@ elif [[ -z "$SNI_DONOR" ]]; then
   SNI_DONOR="www.google.com"; warn "Ни один кандидат не прошёл проверку — беру $SNI_DONOR."
 else
   ok "SNI-донор: $SNI_DONOR"
+fi
+
+# Имя, по которому роутер узнаёт XHTTP: свой домен (self-steal) или SNI-донор.
+if [[ "$USE_ROUTER" == "true" ]]; then
+  if [[ "$SELF_STEAL" == "true" ]]; then XHTTP_SNI="$NODE_DOMAIN"; else XHTTP_SNI="$SNI_DONOR"; fi
+fi
+
+step "SNI-роутер на 443"
+# ---------------------------------------------------------------------------
+# HAProxy в режиме TCP: на 443 читает SNI из ClientHello (TLS не расшифровывает)
+# и пересылает поток на loopback-порт нужного транспорта Xray. Всё остальное —
+# имя ноды, неизвестные имена, подключения без SNI — уходит на сайт-заглушку (Caddy).
+# ---------------------------------------------------------------------------
+if [[ "$USE_ROUTER" != "true" ]]; then
+  log "Разводка по SNI не используется — транспорты на своих портах."
+else
+  apt_run "Ставлю HAProxy" apt-get install -y -q haproxy || die "Не смог поставить HAProxy"
+  # 443 должен быть свободен: старый контейнер ноды остановлен выше, Caddy переехал на loopback.
+  if ss -Htln 2>/dev/null | awk '{print $4}' | grep -qE '(^|[:\]])443$'; then
+    systemctl stop haproxy >/dev/null 2>&1 || true
+    if ss -Htln 2>/dev/null | awk '{print $4}' | grep -qE '(^|[:\]])443$'; then
+      die "Порт 443 занят другим процессом (ss -tlnp | grep :443) — освободи его и запусти скрипт снова."
+    fi
+  fi
+  HAP_ACL="\tuse_backend bk_xhttp if { req_ssl_sni -i $XHTTP_SNI }"
+  HAP_BACKENDS="backend bk_xhttp\n\tserver xhttp 127.0.0.1:$PORT_RT_XHTTP\n"
+  if [[ -n "$GRPC_SNI" ]]; then
+    HAP_ACL="$HAP_ACL\n\tuse_backend bk_grpc if { req_ssl_sni -i $GRPC_SNI }"
+    HAP_BACKENDS="$HAP_BACKENDS\nbackend bk_grpc\n\tserver grpc 127.0.0.1:$PORT_RT_GRPC\n"
+  fi
+  if [[ -n "$BRIDGE_SNI" ]]; then
+    HAP_ACL="$HAP_ACL\n\tuse_backend bk_bridge if { req_ssl_sni -i $BRIDGE_SNI }"
+    HAP_BACKENDS="$HAP_BACKENDS\nbackend bk_bridge\n\tserver bridge 127.0.0.1:$PORT_RT_BRIDGE\n"
+  fi
+  HAP_BIND6=""; [[ "$HAS_V6" == "true" ]] && HAP_BIND6="\tbind :::443 v6only"
+  [[ -f /etc/haproxy/haproxy.cfg && ! -f /etc/haproxy/haproxy.cfg.orig ]] && cp -p /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.orig
+  mkdir -p /etc/haproxy
+  {
+    printf '%s\n' "# Сгенерировано remnanode-deploy.sh: SNI-роутер на 443 (TCP, без расшифровки TLS)." \
+      "global" "	maxconn 50000" "	user haproxy" "	group haproxy" "" \
+      "defaults" "	mode tcp" "	timeout connect 10s" "	timeout client 2h" "	timeout server 2h" \
+      "	timeout tunnel 2h" "	option clitcpka" "	option srvtcpka" "" \
+      "frontend tls_443" "	bind 0.0.0.0:443"
+    [[ -n "$HAP_BIND6" ]] && printf '%b\n' "$HAP_BIND6"
+    printf '%s\n' "	tcp-request inspect-delay 5s" "	tcp-request content accept if { req_ssl_hello_type 1 }"
+    printf '%b\n' "$HAP_ACL" "	default_backend bk_decoy" "" "$HAP_BACKENDS"
+    printf '%s\n' "backend bk_decoy" "	server caddy 127.0.0.1:$PORT_SS_LOCAL"
+  } > /etc/haproxy/haproxy.cfg
+  haproxy -c -f /etc/haproxy/haproxy.cfg >> "$LOG_FILE" 2>&1 || die "Конфиг HAProxy не проходит проверку — см. $LOG_FILE"
+  mkdir -p /etc/systemd/system/haproxy.service.d
+  printf '[Service]\nRestart=always\nRestartSec=3\nLimitNOFILE=1048576\n' > /etc/systemd/system/haproxy.service.d/restart.conf
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable haproxy >/dev/null 2>&1 || true
+  systemctl restart haproxy || die "HAProxy не запустился — journalctl -u haproxy -n 50"
+  ok "HAProxy на 443: $XHTTP_SNI → XHTTP${GRPC_SNI:+, $GRPC_SNI → gRPC}${BRIDGE_SNI:+, $BRIDGE_SNI → мост}; остальное → заглушка."
 fi
 
 # ---------------------------------------------------------------------------
@@ -1589,6 +1738,14 @@ SNI = os.environ.get("RW_SNI_DONOR", "www.google.com")
 SELF_STEAL = os.environ.get("RW_SELF_STEAL") == "true"
 ENABLE_GRPC = os.environ.get("RW_ENABLE_GRPC", "true") == "true"
 HY2_OBFS = os.environ.get("RW_HY2_OBFS", "")
+# Разводка по SNI: транспорты слушают loopback, наружу 443 держит HAProxy.
+ROUTER = os.environ.get("RW_ROUTER") == "true"
+XHTTP_NAME = (os.environ.get("RW_XHTTP_SNI") or SNI) if ROUTER else SNI
+GRPC_NAME = os.environ.get("RW_GRPC_SNI", "")       # пусто = gRPC на своём порту
+BRIDGE_NAME = os.environ.get("RW_BRIDGE_SNI", "")   # пусто = мост на своём порту
+P_RT_XHTTP = int(os.environ.get("RW_PORT_RT_XHTTP", "10443"))
+P_RT_GRPC = int(os.environ.get("RW_PORT_RT_GRPC", "10444"))
+P_RT_BRIDGE = int(os.environ.get("RW_PORT_RT_BRIDGE", "10445"))
 # self-steal: неавторизованные подключения Reality отдаёт СВОЕМУ Caddy (сайт с
 # настоящим LE-сертификатом домена). Без PROXY protocol: IP посетителей заглушки
 # нам не нужен, а лишнее звено — лишний шанс сломать handshake Reality.
@@ -1665,11 +1822,11 @@ SNIFF = {"enabled": True, "destOverride": ["http", "tls", "quic"]}
 
 MIN_CLIENT_VER = os.environ.get("RW_MIN_CLIENT_VER", "")
 
-def reality(key, sid):
+def reality(key, sid, name=None):
     # minClientVer — только если задан явно (MIN_CLIENT_VER): Xray сам предупреждает,
     # что его использование повышает вероятность блокировки.
     r = {"dest": R_DEST, "show": False, "xver": R_XVER,
-         "shortIds": [sid], "privateKey": key, "serverNames": [SNI]}
+         "shortIds": [sid], "privateKey": key, "serverNames": [name or SNI]}
     if MIN_CLIENT_VER:
         r["minClientVer"] = MIN_CLIENT_VER
     return r
@@ -1681,12 +1838,13 @@ inbounds = []
 if ENABLE_GRPC:
     # gRPC + Reality (устаревший транспорт; по умолчанию не ставим при self-steal)
     inbounds.append(
-        {"tag": T_GRPC, "port": P_GRPC, "listen": LISTEN6, "protocol": "vless",
+        {"tag": T_GRPC, "port": (P_RT_GRPC if GRPC_NAME else P_GRPC),
+         "listen": ("127.0.0.1" if GRPC_NAME else LISTEN6), "protocol": "vless",
          "settings": {"clients": [], "decryption": "none"},
          "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
          "streamSettings": {"network": "grpc", "security": "reality",
                             "grpcSettings": {"serviceName": "grpc"},
-                            "realitySettings": reality(grpc_key, grpc_sid)}})
+                            "realitySettings": reality(grpc_key, grpc_sid, GRPC_NAME or SNI)}})
 inbounds += [
     # Hysteria2 — из покупного (серт файлом, alpn h3); нужен UDP-порт открыт
     {"tag": T_HY2, "port": P_HY2, "listen": LISTEN6, "protocol": "hysteria",
@@ -1696,10 +1854,11 @@ inbounds += [
                             "certificates": [{"certificateFile": os.environ["RW_CERT_FILE"],
                                               "keyFile": os.environ["RW_KEY_FILE"]}]}}},
     # Reality + XHTTP (прямой) — работает на свежих клиентах (Happ и т.п.)
-    {"tag": T_XHTTP, "port": P_XHTTP, "listen": "0.0.0.0", "protocol": "vless",
+    {"tag": T_XHTTP, "port": (P_RT_XHTTP if ROUTER else P_XHTTP),
+     "listen": ("127.0.0.1" if ROUTER else "0.0.0.0"), "protocol": "vless",
      "settings": {"clients": [], "decryption": "none"}, "sniffing": SNIFF,
      "streamSettings": {"network": "xhttp", "security": "reality",
-                        "realitySettings": reality(xhttp_key, xhttp_sid),
+                        "realitySettings": reality(xhttp_key, xhttp_sid, XHTTP_NAME),
                         "xhttpSettings": {"path": xhttp_path, "mode": "auto", "xPaddingBytes": "100-1000"}}},
 ]
 # Salamander для Hysteria2. Пароль лежит ТОЛЬКО в инбаунде: Remnawave сам берёт
@@ -1723,9 +1882,11 @@ if ENABLE_BRIDGE:
     # или SS через границу ТСПУ распознаёт сразу; Reality выглядит как TLS.
     # minClientVer не ставим — клиент тут наш же Xray на входной ноде.
     br = {"dest": R_DEST, "show": False, "xver": R_XVER,
-          "shortIds": [os.environ["RW_SID_BRIDGE"]], "privateKey": bridge_key, "serverNames": [SNI]}
+          "shortIds": [os.environ["RW_SID_BRIDGE"]], "privateKey": bridge_key,
+          "serverNames": [BRIDGE_NAME or SNI]}
     inbounds.append(
-        {"tag": T_BRIDGE, "port": P_BRIDGE, "listen": "0.0.0.0", "protocol": "vless",
+        {"tag": T_BRIDGE, "port": (P_RT_BRIDGE if BRIDGE_NAME else P_BRIDGE),
+         "listen": ("127.0.0.1" if BRIDGE_NAME else "0.0.0.0"), "protocol": "vless",
          "settings": {"clients": [], "decryption": "none"},
          "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
          "streamSettings": {"network": "xhttp", "security": "reality", "realitySettings": br,
@@ -1958,10 +2119,12 @@ def mkhost(tag, payload):
 # fingerprint "random": статичный "chrome" на всех хостах — один и тот же JA4 у всех
 # наших серверов, по нему установку легко опознать. random меняет браузер на каждое соединение.
 if ENABLE_GRPC:
-    mkhost(T_GRPC, {"remark": remark("Reality gRPC"), "address": NODE_DOMAIN, "port": P_GRPC,
-        "sni": SNI, "path": "grpc", "alpn": "h2", "fingerprint": "random", "securityLayer": "DEFAULT"})
-mkhost(T_XHTTP, {"remark": remark("Reality XHTTP"), "address": NODE_DOMAIN, "port": P_XHTTP,
-    "sni": SNI, "path": xhttp_path, "alpn": "h2,http/1.1", "fingerprint": "random", "securityLayer": "DEFAULT"})
+    mkhost(T_GRPC, {"remark": remark("Reality gRPC"), "address": NODE_DOMAIN,
+        "port": (443 if GRPC_NAME else P_GRPC),
+        "sni": GRPC_NAME or SNI, "path": "grpc", "alpn": "h2", "fingerprint": "random", "securityLayer": "DEFAULT"})
+mkhost(T_XHTTP, {"remark": remark("Reality XHTTP"), "address": NODE_DOMAIN,
+    "port": (443 if ROUTER else P_XHTTP),
+    "sni": XHTTP_NAME, "path": xhttp_path, "alpn": "h2,http/1.1", "fingerprint": "random", "securityLayer": "DEFAULT"})
 mkhost(T_HY2, {"remark": remark("Hysteria2"), "address": NODE_DOMAIN, "port": P_HY2,
     "sni": NODE_DOMAIN, "alpn": "h3", "fingerprint": "random", "securityLayer": "TLS"})
 if ENABLE_CDN:
@@ -2067,7 +2230,9 @@ env RW_RESULT_FILE="$WORK_DIR/result.json" RW_CDN_HOST_NAME="$CDN_HOST_NAME" \
   RW_EXIT_FILE="$EXIT_FILE" RW_ENTRY_RU_DIRECT="$ENTRY_RU_DIRECT" RW_ENTRY_EXTRA_DIRECT="$ENTRY_EXTRA_DIRECT" RW_CASCADE_TEMPLATE="$CASCADE_TEMPLATE" RW_GEO_CATRU="${GEO_HAS_CATRU:-true}" RW_SID_BRIDGE="$(openssl rand -hex 8)" RW_BRIDGE_PATH="/$(openssl rand -hex 8)/" \
   RW_NODE_NAME="$NODE_NAME" RW_NODE_DOMAIN="$NODE_DOMAIN" RW_NODE_ADDRESS="$NODE_ADDRESS" \
   RW_NODE_PORT="$NODE_PORT" RW_HOST_PREFIX="$HOST_PREFIX" RW_TAG_SUFFIX="$TAG_SUFFIX" \
-  RW_SNI_DONOR="$SNI_DONOR" RW_SELF_STEAL="$SELF_STEAL" RW_PORT_SS_LOCAL="$PORT_SS_LOCAL" RW_ENABLE_CDN="$ENABLE_CDN" RW_ENABLE_BRIDGE="$ENABLE_BRIDGE" \
+  RW_SNI_DONOR="$SNI_DONOR" RW_SELF_STEAL="$SELF_STEAL" RW_PORT_SS_LOCAL="$PORT_SS_LOCAL" \
+  RW_ROUTER="$USE_ROUTER" RW_XHTTP_SNI="$XHTTP_SNI" RW_GRPC_SNI="$GRPC_SNI" RW_BRIDGE_SNI="$BRIDGE_SNI" \
+  RW_PORT_RT_XHTTP="$PORT_RT_XHTTP" RW_PORT_RT_GRPC="$PORT_RT_GRPC" RW_PORT_RT_BRIDGE="$PORT_RT_BRIDGE" RW_ENABLE_CDN="$ENABLE_CDN" RW_ENABLE_BRIDGE="$ENABLE_BRIDGE" \
   RW_MIN_CLIENT_VER="$MIN_CLIENT_VER" \
   RW_SQUAD_MODE="$SQUAD_MODE" RW_SQUAD_UUIDS="$SQUAD_UUIDS" RW_NEW_SQUAD_NAME="$NEW_SQUAD_NAME" \
   RW_CDN_PUBLIC_DOMAIN="$CDN_PUBLIC_DOMAIN" RW_CDN_PATH="$CDN_PATH" \
@@ -2134,14 +2299,17 @@ step "Фаервол"
 # ---------------------------------------------------------------------------
 # Firewall — политика drop совместима (правила в существующую inet filter input)
 # ---------------------------------------------------------------------------
-FW_PORTS=("$PORT_REALITY_XHTTP" 80 443)
-[[ "$ENABLE_GRPC" == "true" ]] && FW_PORTS+=("$PORT_REALITY_GRPC")
+# С SNI-роутером публичны только 80 и 443; отдельные порты — лишь у транспортов вне роутера.
+FW_PORTS=(80 443)
+[[ "$USE_ROUTER" != "true" ]] && FW_PORTS+=("$PORT_REALITY_XHTTP")
+[[ "$ENABLE_GRPC" == "true" && -z "$GRPC_SNI" ]] && FW_PORTS+=("$PORT_REALITY_GRPC")
+BRIDGE_OWN_PORT=false; [[ "$ENABLE_BRIDGE" == "true" && -z "$BRIDGE_SNI" ]] && BRIDGE_OWN_PORT=true
 FW_TCP="$(printf '%s\n' "${FW_PORTS[@]}" | sort -un | paste -sd, - | sed 's/,/, /g')"
 # IP входных нод хранятся в файле — новый вход добавляется одной строкой
 # без переустановки: echo IP >> $PEERS_FILE && /usr/local/bin/rw-node-firewall.sh
 PEERS_FILE="$NODE_DIR/bridge-peers"
 BRIDGE_RULES=""
-if [[ "$ENABLE_BRIDGE" == "true" ]]; then
+if [[ "$BRIDGE_OWN_PORT" == "true" ]]; then
   : > "$PEERS_FILE"
   for ip in $BRIDGE_PEERS; do printf '%s\n' "$ip" >> "$PEERS_FILE"; done
   # Файл пуст — порт моста ЗАКРЫТ (кроме явного any): так мост не виден сканерам.
@@ -2260,13 +2428,13 @@ elif [[ "$FW_KIND" == "ufw" ]]; then
   ufw allow "$PORT_HY2"/udp >/dev/null 2>&1 || true
   if [[ -n "$PANEL_IP" ]]; then ufw allow from "$PANEL_IP" to any port "$NODE_PORT" proto tcp >/dev/null 2>&1 || true
   else ufw allow "$NODE_PORT"/tcp >/dev/null 2>&1 || true; fi
-  if [[ "$ENABLE_BRIDGE" == "true" ]]; then
+  if [[ "$BRIDGE_OWN_PORT" == "true" ]]; then
     if [[ -n "$BRIDGE_PEERS" ]]; then for ip in $BRIDGE_PEERS; do ufw allow from "$ip" to any port "$PORT_BRIDGE" proto tcp >/dev/null 2>&1 || true; done
     elif [[ "$BRIDGE_ANY" == "true" ]]; then ufw allow "$PORT_BRIDGE"/tcp >/dev/null 2>&1 || true; fi
   fi
 else
   warn "Сервер без фаервола: все порты открыты. NODE_PORT $NODE_PORT защищён только SECRET_KEY."
-  [[ "$ENABLE_BRIDGE" == "true" ]] && warn "Порт моста $PORT_BRIDGE тоже открыт всем — без фаервола ограничить его по IP нельзя."
+  [[ "$BRIDGE_OWN_PORT" == "true" ]] && warn "Порт моста $PORT_BRIDGE тоже открыт всем — без фаервола ограничить его по IP нельзя."
 fi
 
 
@@ -2346,14 +2514,24 @@ fi
 printf '  %s╰─%s\n' "$C_MAG" "$C_RST"
 
 printf '\n  %s╭─ Инбаунды%s\n' "$C_MAG" "$C_RST"
-[[ "$ENABLE_GRPC" == "true" ]] && kv "Reality gRPC" "TCP $PORT_REALITY_GRPC"
-kv "Reality XHTTP" "TCP $PORT_REALITY_XHTTP$([[ "$SELF_STEAL" == "true" ]] && echo "  (self-steal, сайт-заглушка за ним)")"
+if [[ "$USE_ROUTER" == "true" ]]; then
+  kv "SNI-роутер" "HAProxy на TCP 443 (+80 для сертификата)"
+  kv "Reality XHTTP" "SNI $XHTTP_SNI → loopback :$PORT_RT_XHTTP"
+  [[ -n "$GRPC_SNI" ]] && kv "Reality gRPC" "SNI $GRPC_SNI → loopback :$PORT_RT_GRPC"
+  [[ "$ENABLE_GRPC" == "true" && -z "$GRPC_SNI" ]] && kv "Reality gRPC" "TCP $PORT_REALITY_GRPC (вне роутера)"
+else
+  [[ "$ENABLE_GRPC" == "true" ]] && kv "Reality gRPC" "TCP $PORT_REALITY_GRPC"
+  kv "Reality XHTTP" "TCP $PORT_REALITY_XHTTP$([[ "$SELF_STEAL" == "true" ]] && echo "  (self-steal, сайт-заглушка за ним)")"
+fi
 kv "Hysteria2"     "UDP $PORT_HY2$([[ -n "$HY2_OBFS" ]] && echo " · salamander")  (UDP должен быть открыт у хостера)"
 [[ "$ENABLE_CDN" == "true" ]]    && kv "CDN XHTTP" "Yandex CDN → Caddy → 127.0.0.1:$PORT_CDN_LOCAL"
-[[ "$ENABLE_BRIDGE" == "true" ]] && kv "Мост" "TCP $PORT_BRIDGE · VLESS+Reality+XHTTP · только сервисный юзер"
+if [[ "$ENABLE_BRIDGE" == "true" ]]; then
+  if [[ -n "$BRIDGE_SNI" ]]; then kv "Мост" "SNI $BRIDGE_SNI → loopback :$PORT_RT_BRIDGE · VLESS+Reality+XHTTP · только сервисный юзер"
+  else kv "Мост" "TCP $PORT_BRIDGE · VLESS+Reality+XHTTP · только сервисный юзер"; fi
+fi
 printf '  %s╰─%s\n' "$C_MAG" "$C_RST"
 
-if [[ "$NODE_ROLE" == "entry" && -n "$PUBLIC_IP" ]]; then
+if [[ "$NODE_ROLE" == "entry" && -n "$PUBLIC_IP" && "$EXIT_PORT" != "443" ]]; then
   printf '\n  %s╭─ На выходной ноде (%s)%s\n' "$C_BLU" "$EXIT_NAME" "$C_RST"
   kv "Если мост закрыт" "порт $PORT_BRIDGE ограничен по IP — разреши этот вход:"
   kv ""                 "echo $PUBLIC_IP >> /opt/remnanode/bridge-peers && /usr/local/bin/rw-node-firewall.sh"
@@ -2364,12 +2542,14 @@ if [[ "$ENABLE_BRIDGE" == "true" ]]; then
   printf '\n  %s╭─ Каскад: эта нода — выход%s\n' "$C_BLU" "$C_RST"
   kv "Дальше" "поставь входную ноду этим же скриптом, роль 2 —"
   kv ""       "она сама найдёт этот выход в панели"
-  if [[ -n "$BRIDGE_PEERS" ]]; then kv "Порт моста" "$PORT_BRIDGE открыт только для: $BRIDGE_PEERS"
+  if [[ -n "$BRIDGE_SNI" ]]; then
+    kv "Порт моста" "отдельного нет: мост на 443, его находит только вход (по имени $BRIDGE_SNI и ключу Reality)"
+  elif [[ -n "$BRIDGE_PEERS" ]]; then kv "Порт моста" "$PORT_BRIDGE открыт только для: $BRIDGE_PEERS"
   elif [[ "$BRIDGE_ANY" == "true" ]]; then kv "Порт моста" "$PORT_BRIDGE открыт всем (защищён Reality + UUID)"
   else kv "Порт моста" "$PORT_BRIDGE ЗАКРЫТ — добавь IP входной ноды (команда ниже)"; fi
-  if [[ "$FW_KIND" == "nft" ]]; then
+  if [[ "$BRIDGE_OWN_PORT" == "true" && "$FW_KIND" == "nft" ]]; then
     kv "Новый вход" "echo IP >> $PEERS_FILE && /usr/local/bin/rw-node-firewall.sh"
-  elif [[ "$FW_KIND" == "ufw" ]]; then
+  elif [[ "$BRIDGE_OWN_PORT" == "true" && "$FW_KIND" == "ufw" ]]; then
     kv "Новый вход" "ufw allow from IP to any port $PORT_BRIDGE proto tcp"
   fi
   printf '  %s╰─%s\n' "$C_BLU" "$C_RST"
