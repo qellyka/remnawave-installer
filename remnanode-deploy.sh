@@ -18,6 +18,9 @@
 #   - разводка по SNI: HAProxy на 443 читает имя сайта в ClientHello (TLS не
 #     расшифровывает) и раздаёт TCP-потоки транспортам (XHTTP, gRPC, мост) —
 #     снаружи один порт 443, остальные порты закрыты;
+#   - вход каскада: российские сайты на устройстве клиента (шаблон Split RU), выбранные
+#     сервисы (например YouTube) — напрямую с входа; канал вход → выход по IPv4 или IPv6;
+#   - фрагментация ClientHello на хостах (Final Mask) — против обрезания TLS на 443;
 #   - маскировка Reality: self-steal (SNI = свой домен, Reality на 443,
 #     сайт-заглушка за ним через PROXY protocol) или чужой SNI-донор;
 #   - создаёт хосты с именами вида "🇩🇪 DE | Reality gRPC", добавляет
@@ -146,6 +149,11 @@ PORT_REALITY_GRPC=2083
 PORT_REALITY_XHTTP=2053
 PORT_HY2=443           # UDP 443: рядом с TCP 443 — как у обычного сайта с HTTP/3
 ENABLE_GRPC=true       # перезаписывается вопросом «gRPC» в параметрах установки
+ENABLE_FRAG=false      # фрагментация ClientHello (Final Mask) на TCP-хостах
+CLIENT_SPLIT=false     # вход: российские сайты на устройстве клиента (шаблон Split RU)
+TEMPLATE_KIND="gov"; TEMPLATE_PROXY_DOMAINS=""
+ENTRY_V6_ADDR=""       # вход: IPv6-адрес выхода, если канал вход → выход по IPv6
+SPLIT_TEMPLATE_NAME="${SPLIT_TEMPLATE_NAME:-Split RU}"
 HY2_OBFS=""            # пароль salamander; пусто = без обфускации
 PORT_CDN_LOCAL=4443    # xray слушает localhost, наружу через Caddy
 PORT_BRIDGE=8888       # BRIDGE_IN, server-side routing (между нодами)
@@ -226,6 +234,11 @@ flush_input() {
 
 is_ip() {  # IPv4 или IPv6 (грубая, но достаточная проверка)
   [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || [[ "$1" =~ ^[0-9A-Fa-f:]+:[0-9A-Fa-f:.]*$ ]]
+}
+
+v6_reachable() {  # $1 адрес, $2 порт — TCP-подключение по IPv6 с этого сервера
+  [[ -n "${RW_SKIP_NET_CHECKS:-}" ]] && return 0
+  timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null
 }
 
 read_clean() {  # $1 prompt, $2 varname, $3 charset — чистит артефакты вставки
@@ -396,6 +409,21 @@ if [[ "$_o" == "1" ]]; then
   else HY2_OBFS="$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"; fi
 fi
 
+hr
+echo "  Фрагментация ClientHello (Final Mask) на TCP-хостах."
+echo "  Часть операторов в РФ режет ClientHello на 443/TCP. Клиент при подключении дробит его"
+echo "  на 4 куска (~20 мс к рукопожатию); с SNI-роутером совместимо (проверено на HAProxy)."
+echo "  Для хостов gRPC/XHTTP и канала вход → выход. Hysteria2 (UDP) это не касается."
+echo "    1) включить (рекомендуется)   2) нет"
+while true; do
+  flush_input
+  read -rp "${Q}Фрагментация [1/2, Enter — 1]: " _fr
+  _fr=$(printf '%s' "$_fr" | tr -d '[:space:]'); _fr="${_fr:-1}"
+  [[ "$_fr" == "1" || "$_fr" == "2" ]] && break
+  warn "Введи 1 или 2."
+done
+[[ "$_fr" == "1" ]] && ENABLE_FRAG=true
+
 rand_label() {  # правдоподобное имя поддомена: <слово>-<4 hex>
   local w=(api cdn static media assets files img app edge data dl cache)
   printf '%s-%s' "${w[RANDOM % ${#w[@]}]}" "$(head -c 2 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -527,6 +555,7 @@ kv "Маскировка" "$([[ "$SELF_STEAL" == "true" ]] && echo "self-steal (
 kv "gRPC" "$([[ "$ENABLE_GRPC" == "true" ]] && echo "включён (TCP $PORT_REALITY_GRPC)" || echo "не ставим")"
 kv "Hysteria2" "UDP $PORT_HY2, $([[ -n "$HY2_OBFS" ]] && echo "salamander" || echo "без обфускации")"
 kv "SNI-роутер" "$([[ "$USE_ROUTER" == "true" ]] && echo "HAProxy на 443$([[ ${#ROUTER_NAMES[@]} -gt 0 ]] && echo " · поддомены: ${ROUTER_NAMES[*]}")" || echo "нет — отдельные порты")"
+kv "Фрагментация" "$([[ "$ENABLE_FRAG" == "true" ]] && echo "ClientHello на хостах TCP (Final Mask)" || echo "нет")"
 kv "CDN" "$([[ "$ENABLE_CDN" == "true" ]] && echo "$CDN_PUBLIC_DOMAIN" || echo "нет")"
 kv "WARP" "$WARP_MODE"
 [[ -n "$HOST_PREFIX" ]] && kv "Хосты" "$HOST_PREFIX …"
@@ -589,6 +618,8 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 PUBLIC_IP=$(curl -s -4 --max-time 5 https://api.ipify.org || echo "")
+PUBLIC_IP6=$(curl -s -6 --max-time 5 https://api6.ipify.org 2>/dev/null || echo "")
+[[ "$PUBLIC_IP6" == *:* ]] && is_ip "$PUBLIC_IP6" || PUBLIC_IP6=""
 RESOLVED=$(dig +short "$NODE_DOMAIN" A | tail -n1 || true)
 if [[ -z "$RESOLVED" ]]; then
   warn "$NODE_DOMAIN пока не резолвится — сертификат, скорее всего, не выпустится."
@@ -992,20 +1023,25 @@ PICKEOF
   # отпускать ли RU-сайты напрямую и из какого списка брать SNI-донора.
   # Выбор цифрой (не y/n): раскладка и невидимые символы не должны молча
   # превращать «да» в «нет» — так однажды и потерялись RU-правила на входе.
-  _def=2; [[ "$ENTRY_CC" == "RU" ]] && _def=1
+  _def=3; [[ "$ENTRY_CC" == "RU" ]] && _def=1
   hr
-  echo "  Российские сайты на входе ($ENTRY_CC):"
-  echo "    1) напрямую с этого сервера — Яндекс, банки, маркетплейсы видят IP входа"
-  echo "    2) всё через выход ($EXIT_CC)"
+  echo "  Российские сайты ($ENTRY_CC):"
+  echo "    1) на УСТРОЙСТВЕ клиента (Split RU) — рекомендуется: реальный IP клиента, Госуслуги"
+  echo "       и банки работают, вход не нагружен (шаблон «$SPLIT_TEMPLATE_NAME» на хостах входа)"
+  echo "    2) напрямую с этого сервера — сайты видят IP входа"
+  echo "    3) всё через выход ($EXIT_CC)"
   while true; do
     flush_input
-    read -rp "${Q}Выбор [1/2, Enter — $_def]: " _rd
+    read -rp "${Q}Выбор [1/2/3, Enter — $_def]: " _rd
     _rd=$(printf '%s' "$_rd" | tr -d '[:space:]'); _rd="${_rd:-$_def}"
-    [[ "$_rd" == "1" || "$_rd" == "2" ]] && break
-    warn "Введи 1 или 2."
+    [[ "$_rd" == "1" || "$_rd" == "2" || "$_rd" == "3" ]] && break
+    warn "Введи 1, 2 или 3."
   done
-  ENTRY_RU_DIRECT=false; [[ "$_rd" == "1" ]] && ENTRY_RU_DIRECT=true
-  if [[ "$ENTRY_RU_DIRECT" == "true" ]]; then
+  ENTRY_RU_DIRECT=false; CLIENT_SPLIT=false
+  case "$_rd" in 1) CLIENT_SPLIT=true ;; 2) ENTRY_RU_DIRECT=true ;; esac
+  if [[ "$CLIENT_SPLIT" == "true" ]]; then
+    ok "Российские сайты — с устройства клиента; остальное — вход → $EXIT_NAME ($EXIT_CC)."
+  elif [[ "$ENTRY_RU_DIRECT" == "true" ]]; then
     ok "Российские сайты — напрямую с входа, остальное — в $EXIT_NAME ($EXIT_CC)."
   else
     ok "Весь трафик — в $EXIT_NAME ($EXIT_CC)."
@@ -1153,6 +1189,21 @@ GEOEOF
   done
   [[ -n "$ENTRY_EXTRA_LABELS" ]] && ok "Напрямую с входа: $ENTRY_EXTRA_LABELS"
 
+  if [[ "$CLIENT_SPLIT" == "true" ]]; then
+    # Российские сайты (в т.ч. госсайты) идут с устройства клиента. Выбранные сервисы
+    # (YouTube и др.) в шаблоне принудительно уходят в прокси ВЫШЕ правила geoip:ru:
+    # иначе домен, чей адрес случайно окажется российским (кэши Google у провайдера),
+    # пошёл бы мимо входа.
+    CASCADE_TEMPLATE="$SPLIT_TEMPLATE_NAME"; TEMPLATE_KIND="split"
+    IFS=',' read -ra _ex <<< "${ENTRY_EXTRA_DIRECT:-}"
+    for _e in "${_ex[@]:-}"; do
+      case "$_e" in
+        geosite:youtube) TEMPLATE_PROXY_DOMAINS="${TEMPLATE_PROXY_DOMAINS:+$TEMPLATE_PROXY_DOMAINS,}youtube.com,youtu.be,ytimg.com,googlevideo.com,ggpht.com,youtube-nocookie.com,youtubei.googleapis.com" ;;
+        domain:*)        TEMPLATE_PROXY_DOMAINS="${TEMPLATE_PROXY_DOMAINS:+$TEMPLATE_PROXY_DOMAINS,}${_e#domain:}" ;;
+      esac
+    done
+    ok "На хостах входа — шаблон «$SPLIT_TEMPLATE_NAME» (создам, если его нет в панели)."
+  else
   # Госуслуги и другие госсайты не пускают IP хостингов — даже российских.
   # Им нужен IP самого клиента: шаблон Xray JSON на хостах входа выпускает их
   # напрямую с устройства, остальное идёт через каскад как обычно.
@@ -1169,6 +1220,42 @@ GEOEOF
     warn "Введи 1 или 2."
   done
   CASCADE_TEMPLATE=""; [[ "$_tp" == "1" ]] && CASCADE_TEMPLATE="$CASCADE_TEMPLATE_NAME"
+  fi
+
+  # Канал вход → выход: IPv4 или IPv6.
+  hr
+  echo "  Канал вход → выход (мост):"
+  echo "    1) IPv4 (как сейчас)"
+  echo "    2) IPv6 — у части операторов международный IPv6 режут мягче; нужен IPv6 на обоих серверах"
+  while true; do
+    flush_input
+    read -rp "${Q}Канал [1/2, Enter — 1]: " _v
+    _v=$(printf '%s' "$_v" | tr -d '[:space:]'); _v="${_v:-1}"
+    [[ "$_v" == "1" || "$_v" == "2" ]] && break
+    warn "Введи 1 или 2."
+  done
+  ENTRY_V6_ADDR=""
+  if [[ "$_v" == "2" ]]; then
+    EXIT_SNI=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['sni'])" "$EXIT_FILE")
+    _cand=""
+    [[ -n "$EXIT_SNI" ]] && _cand=$(dig +short AAAA "$EXIT_SNI" 2>/dev/null | grep ':' | head -1 || true)
+    [[ -n "$_cand" ]] && log "AAAA для $EXIT_SNI: $_cand"
+    echo "  IPv6-адрес выхода $EXIT_NAME показан в итоге его установки (или: ip -6 addr на выходе)."
+    while true; do
+      read -rp "${Q}IPv6 выхода ${_cand:+[$_cand] }(Enter — принять, 0 — вернуться на IPv4): " _a
+      _a=$(printf '%s' "$_a" | tr -d '[:space:]')
+      [[ "$_a" == "0" ]] && { warn "Канал остаётся на IPv4."; break; }
+      [[ -z "$_a" ]] && _a="$_cand"
+      if [[ "$_a" == *:* ]] && is_ip "$_a"; then
+        if v6_reachable "$_a" "$EXIT_PORT"; then
+          ENTRY_V6_ADDR="$_a"; ok "Канал к выходу — IPv6: [$_a]:$EXIT_PORT"; break
+        fi
+        warn "С этого сервера [$_a]:$EXIT_PORT недоступен по IPv6 (нет IPv6 у входа, не тот адрес или закрыт порт)."
+      else
+        warn "Нужен IPv6-адрес (например 2001:db8::1)."
+      fi
+    done
+  fi
   log "Выход: $EXIT_NAME ($EXIT_CC). Префикс хостов: \"$HOST_PREFIX\""
 fi
 
@@ -1739,6 +1826,12 @@ SELF_STEAL = os.environ.get("RW_SELF_STEAL") == "true"
 ENABLE_GRPC = os.environ.get("RW_ENABLE_GRPC", "true") == "true"
 HY2_OBFS = os.environ.get("RW_HY2_OBFS", "")
 # Разводка по SNI: транспорты слушают loopback, наружу 443 держит HAProxy.
+FRAG = os.environ.get("RW_FRAG") == "true"
+# Фрагментация ClientHello: TCP-слайс первой записи (packets 1-1), 4 куска за ~20 мс.
+# НЕ "tlshello": он режет на отдельные TLS-записи, и SNI-роутер (HAProxy/nginx) не
+# может достать SNI — проверено на HAProxy 2.8: соединение уходит на заглушку.
+FRAG_MASK = {"tcp": [{"type": "fragment", "settings": {
+    "packets": "1-1", "lengths": ["3-5", "6-8", "10-20"], "delays": ["5-10"], "maxSplit": "3-6"}}]}
 ROUTER = os.environ.get("RW_ROUTER") == "true"
 XHTTP_NAME = (os.environ.get("RW_XHTTP_SNI") or SNI) if ROUTER else SNI
 GRPC_NAME = os.environ.get("RW_GRPC_SNI", "")       # пусто = gRPC на своём порту
@@ -1886,7 +1979,7 @@ if ENABLE_BRIDGE:
           "serverNames": [BRIDGE_NAME or SNI]}
     inbounds.append(
         {"tag": T_BRIDGE, "port": (P_RT_BRIDGE if BRIDGE_NAME else P_BRIDGE),
-         "listen": ("127.0.0.1" if BRIDGE_NAME else "0.0.0.0"), "protocol": "vless",
+         "listen": ("127.0.0.1" if BRIDGE_NAME else LISTEN6), "protocol": "vless",
          "settings": {"clients": [], "decryption": "none"},
          "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
          "streamSettings": {"network": "xhttp", "security": "reality", "realitySettings": br,
@@ -1910,12 +2003,13 @@ if EXIT_FILE and os.path.exists(EXIT_FILE):
     ex = json.load(open(EXIT_FILE))
     profile_outbounds.append({
         "tag": "to-exit", "protocol": "vless",
-        "settings": {"vnext": [{"address": ex["address"], "port": int(ex["port"]),
+        "settings": {"vnext": [{"address": (os.environ.get("RW_EXIT_ADDR") or ex["address"]), "port": int(ex["port"]),
                                 "users": [{"id": ex["uuid"], "encryption": "none"}]}]},
         "streamSettings": {"network": "xhttp", "security": "reality",
             "realitySettings": {"serverName": ex["sni"], "publicKey": ex["publicKey"],
                                 "shortId": ex["shortId"], "fingerprint": "random"},
-            "xhttpSettings": {"path": ex["path"], "mode": "auto"}}})
+            "xhttpSettings": {"path": ex["path"], "mode": "auto"},
+            **({"finalmask": FRAG_MASK} if FRAG else {})}})
     # RU — напрямую с входа (российский IP), если включено; остальное — в выход.
     if os.environ.get("RW_ENTRY_RU_DIRECT") == "true":
       profile_rules += [
@@ -1933,7 +2027,8 @@ if EXIT_FILE and os.path.exists(EXIT_FILE):
         elog(f"  Напрямую с входа также: {', '.join(extra)}")
     profile_rules.append({"type": "field", "network": "tcp,udp", "outboundTag": "to-exit"})
     rd = "RU напрямую, остальное" if os.environ.get("RW_ENTRY_RU_DIRECT") == "true" else "весь трафик"
-    elog(f"  Каскад: {rd} -> {ex['node']} ({ex['address']}:{ex['port']})")
+    _ea = os.environ.get("RW_EXIT_ADDR") or ex["address"]
+    elog(f"  Каскад: {rd} -> {ex['node']} ({('[' + _ea + ']') if ':' in _ea else _ea}:{ex['port']})")
 
 WARP_MODE = os.environ.get("RW_WARP_MODE", "off")
 WARP_OUT = os.environ.get("RW_WARP_OUTBOUND", "")
@@ -2084,6 +2179,29 @@ CASCADE_TPL_JSON = {
     "outbounds": [{"tag": "direct", "protocol": "freedom"},
                   {"tag": "block", "protocol": "blackhole"}],
 }
+TPL_KIND = os.environ.get("RW_TEMPLATE_KIND", "gov")
+FORCE_PROXY = [d for d in os.environ.get("RW_TEMPLATE_PROXY_DOMAINS", "").split(",") if d]
+def split_tpl():
+    # Split RU на стороне клиента: российские сайты — с устройства, остальное — в прокси.
+    rules = [{"protocol": ["bittorrent"], "outboundTag": "direct"},
+             {"ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
+                     "169.254.0.0/16", "100.64.0.0/10", "fc00::/7", "fe80::/10", "::1/128"],
+              "outboundTag": "direct"}]
+    if FORCE_PROXY:
+        rules.append({"domain": [f"domain:{d}" for d in FORCE_PROXY], "outboundTag": "proxy"})
+    rules += [
+        {"domain": ["domain:theins.ru", "domain:tvrain.ru", "domain:echo.msk.ru", "domain:novayagazeta.ru",
+                    "domain:moscowtimes.ru", "domain:meduza.io", "domain:4pda.to", "domain:4pda.ru"],
+         "outboundTag": "proxy"},
+        {"domain": ["domain:ru", "domain:su", "domain:xn--p1ai", "domain:yandex.com", "domain:yandex.net",
+                    "domain:yastatic.net", "domain:ya.ru", "domain:vk.com", "domain:vk.ru", "domain:userapi.com",
+                    "domain:vkuser.net", "domain:mycdn.me", "domain:ozone.ru", "domain:wbstatic.net",
+                    "domain:wbbasket.ru"], "outboundTag": "direct"},
+        {"ip": ["geoip:ru"], "outboundTag": "direct"},
+        {"network": "tcp,udp", "outboundTag": "proxy"}]
+    t = json.loads(json.dumps(CASCADE_TPL_JSON))
+    t["routing"]["rules"] = rules
+    return t
 TPL_UUID = None
 TPL_NAME = os.environ.get("RW_CASCADE_TEMPLATE", "")
 if EXIT_FILE and TPL_NAME:
@@ -2093,23 +2211,28 @@ if EXIT_FILE and TPL_NAME:
     if hit:
         TPL_UUID = hit["uuid"]
         elog(f"  Шаблон «{TPL_NAME}» уже есть — привязываю к хостам как есть.")
+        if TPL_KIND == "split" and FORCE_PROXY:
+            elog(f"  [WARN] добавь в «{TPL_NAME}» ВЫШЕ правил RU: domain:{', domain:'.join(FORCE_PROXY[:3])}… -> proxy,")
+            elog("         иначе домены с российским адресом (кэши Google) пойдут мимо входа.")
     else:
         c = api("POST", "/api/subscription-templates", {"name": TPL_NAME, "templateType": "XRAY_JSON"}, fatal=False)
         if "__error__" in c:
             elog(f"  [WARN] шаблон «{TPL_NAME}» не создан: {c['__error__']}")
         else:
             uuid_ = (c.get("response") or {}).get("uuid")
-            u = api("PATCH", "/api/subscription-templates", {"uuid": uuid_, "templateJson": CASCADE_TPL_JSON}, fatal=False)
+            u = api("PATCH", "/api/subscription-templates", {"uuid": uuid_, "templateJson": (split_tpl() if TPL_KIND == "split" else CASCADE_TPL_JSON)}, fatal=False)
             if "__error__" in u:
                 elog(f"  [WARN] шаблон создан, но не заполнен: {u['__error__']}")
             else:
                 TPL_UUID = uuid_
-                elog(f"  Создан шаблон «{TPL_NAME}» (госсайты — напрямую с устройства).")
+                elog(f"  Создан шаблон «{TPL_NAME}» ({'российские сайты' if TPL_KIND == 'split' else 'госсайты'} — напрямую с устройства).")
 
 def mkhost(tag, payload):
     payload["inbound"] = {"configProfileUuid": PROFILE_UUID, "configProfileInboundUuid": tag_uuid[tag]}
     if TPL_UUID:
         payload["xrayJsonTemplateUuid"] = TPL_UUID
+    if FRAG and tag in (T_GRPC, T_XHTTP):
+        payload["finalMask"] = FRAG_MASK
     r = api("POST", "/api/hosts", payload, fatal=False)
     if "__error__" in r:
         elog(f"      [WARN] {tag}: хост не создан — {r['__error__']}")
@@ -2227,7 +2350,7 @@ NODE_ADDRESS="${PUBLIC_IP:-$NODE_DOMAIN}"
 log "Создаю профиль, ноду и хосты в панели..."
 env RW_RESULT_FILE="$WORK_DIR/result.json" RW_CDN_HOST_NAME="$CDN_HOST_NAME" \
   RW_WARP_MODE="$WARP_MODE" RW_WARP_OUTBOUND="$WARP_OUTBOUND_FILE" RW_WARP_DOMAINS="$WARP_DOMAINS" \
-  RW_EXIT_FILE="$EXIT_FILE" RW_ENTRY_RU_DIRECT="$ENTRY_RU_DIRECT" RW_ENTRY_EXTRA_DIRECT="$ENTRY_EXTRA_DIRECT" RW_CASCADE_TEMPLATE="$CASCADE_TEMPLATE" RW_GEO_CATRU="${GEO_HAS_CATRU:-true}" RW_SID_BRIDGE="$(openssl rand -hex 8)" RW_BRIDGE_PATH="/$(openssl rand -hex 8)/" \
+  RW_EXIT_FILE="$EXIT_FILE" RW_ENTRY_RU_DIRECT="$ENTRY_RU_DIRECT" RW_ENTRY_EXTRA_DIRECT="$ENTRY_EXTRA_DIRECT" RW_CASCADE_TEMPLATE="$CASCADE_TEMPLATE" RW_TEMPLATE_KIND="$TEMPLATE_KIND" RW_TEMPLATE_PROXY_DOMAINS="$TEMPLATE_PROXY_DOMAINS" RW_FRAG="$ENABLE_FRAG" RW_EXIT_ADDR="$ENTRY_V6_ADDR" RW_GEO_CATRU="${GEO_HAS_CATRU:-true}" RW_SID_BRIDGE="$(openssl rand -hex 8)" RW_BRIDGE_PATH="/$(openssl rand -hex 8)/" \
   RW_NODE_NAME="$NODE_NAME" RW_NODE_DOMAIN="$NODE_DOMAIN" RW_NODE_ADDRESS="$NODE_ADDRESS" \
   RW_NODE_PORT="$NODE_PORT" RW_HOST_PREFIX="$HOST_PREFIX" RW_TAG_SUFFIX="$TAG_SUFFIX" \
   RW_SNI_DONOR="$SNI_DONOR" RW_SELF_STEAL="$SELF_STEAL" RW_PORT_SS_LOCAL="$PORT_SS_LOCAL" \
@@ -2507,9 +2630,14 @@ fi
 if [[ "$NODE_ROLE" == "entry" ]]; then
   _rd="весь трафик → выход"
   [[ "$ENTRY_RU_DIRECT" == "true" ]] && _rd="RU-сайты напрямую ($ENTRY_CC), остальное → выход"
+  [[ "$CLIENT_SPLIT" == "true" ]] && _rd="RU-сайты — с устройства клиента (шаблон $SPLIT_TEMPLATE_NAME), остальное → вход → выход"
   kv "Каскад" "$_rd"
+  kv "Канал к выходу" "$([[ -n "$ENTRY_V6_ADDR" ]] && echo "IPv6 [$ENTRY_V6_ADDR]:$EXIT_PORT" || echo "IPv4")"
   [[ -n "${ENTRY_EXTRA_LABELS:-}" ]] && kv "Напрямую" "$ENTRY_EXTRA_LABELS"
-  [[ -n "${CASCADE_TEMPLATE:-}" ]] && kv "Шаблон хостов" "$CASCADE_TEMPLATE — госсайты напрямую с устройства клиента"
+  if [[ -n "${CASCADE_TEMPLATE:-}" ]]; then
+    if [[ "$TEMPLATE_KIND" == "split" ]]; then kv "Шаблон хостов" "$CASCADE_TEMPLATE — российские сайты напрямую с устройства клиента"
+    else kv "Шаблон хостов" "$CASCADE_TEMPLATE — госсайты напрямую с устройства клиента"; fi
+  fi
 fi
 printf '  %s╰─%s\n' "$C_MAG" "$C_RST"
 
@@ -2542,6 +2670,7 @@ if [[ "$ENABLE_BRIDGE" == "true" ]]; then
   printf '\n  %s╭─ Каскад: эта нода — выход%s\n' "$C_BLU" "$C_RST"
   kv "Дальше" "поставь входную ноду этим же скриптом, роль 2 —"
   kv ""       "она сама найдёт этот выход в панели"
+  [[ -n "$PUBLIC_IP6" ]] && kv "IPv6 сервера" "$PUBLIC_IP6 — для канала вход → выход по IPv6 (его же можно прописать в AAAA для ${BRIDGE_SNI:-имени моста})"
   if [[ -n "$BRIDGE_SNI" ]]; then
     kv "Порт моста" "отдельного нет: мост на 443, его находит только вход (по имени $BRIDGE_SNI и ключу Reality)"
   elif [[ -n "$BRIDGE_PEERS" ]]; then kv "Порт моста" "$PORT_BRIDGE открыт только для: $BRIDGE_PEERS"
