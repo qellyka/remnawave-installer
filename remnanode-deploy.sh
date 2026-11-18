@@ -643,6 +643,17 @@ if [[ -n "$RESOLVED6" ]] && ! ip -6 addr 2>/dev/null | grep -qi "${RESOLVED6%%/*
 fi
 # Ядро без IPv6 (ipv6.disable=1): слушать [::] нельзя — xray упадёт.
 HAS_V6=false; [[ -e /proc/net/if_inet6 ]] && HAS_V6=true
+# IPv6-адрес есть, а наружу IPv6 не ходит (хостер не маршрутизирует) — тогда Xray
+# для сайтов с AAAA (Google и др.) выбирает IPv6 и висит до таймаута. Проверяем
+# и в таком случае выпускаем трафик клиентов только по IPv4.
+DIRECT_V4=false
+if ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+  if ! curl -6 -s -o /dev/null --max-time 6 https://www.google.com 2>/dev/null \
+     && ! curl -6 -s -o /dev/null --max-time 6 https://www.cloudflare.com 2>/dev/null; then
+    DIRECT_V4=true
+    warn "IPv6-адрес есть, но IPv6 наружу не работает — трафик клиентов пойдёт только по IPv4."
+  fi
+fi
 PANEL_IP=$(dig +short "$PANEL_HOST" A | tail -n1 || true)
 # Если панель за Cloudflare/CDN, DNS отдаёт IP прокси, а не сервера панели —
 # тогда правило на NODE_PORT заблокирует саму панель. Даём поправить.
@@ -1990,7 +2001,8 @@ rnd = (SUFFIX.split("-")[-1] or os.urandom(3).hex())[:6]
 # Уникальное имя (домен + рандом) — чтобы повторный прогон не ловил 409.
 PROFILE_NAME = (f"node-{safe}"[:23].rstrip("-")) + "-" + rnd
 
-profile_outbounds = [{"tag": "direct", "protocol": "freedom"},
+profile_outbounds = [({"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}}
+                      if os.environ.get("RW_DIRECT_V4") == "true" else {"tag": "direct", "protocol": "freedom"}),
                      {"tag": "block", "protocol": "blackhole"}]
 profile_rules = [
     {"type": "field", "inboundTag": ["dns-internal"], "outboundTag": "direct"},
@@ -2350,7 +2362,7 @@ NODE_ADDRESS="${PUBLIC_IP:-$NODE_DOMAIN}"
 log "Создаю профиль, ноду и хосты в панели..."
 env RW_RESULT_FILE="$WORK_DIR/result.json" RW_CDN_HOST_NAME="$CDN_HOST_NAME" \
   RW_WARP_MODE="$WARP_MODE" RW_WARP_OUTBOUND="$WARP_OUTBOUND_FILE" RW_WARP_DOMAINS="$WARP_DOMAINS" \
-  RW_EXIT_FILE="$EXIT_FILE" RW_ENTRY_RU_DIRECT="$ENTRY_RU_DIRECT" RW_ENTRY_EXTRA_DIRECT="$ENTRY_EXTRA_DIRECT" RW_CASCADE_TEMPLATE="$CASCADE_TEMPLATE" RW_TEMPLATE_KIND="$TEMPLATE_KIND" RW_TEMPLATE_PROXY_DOMAINS="$TEMPLATE_PROXY_DOMAINS" RW_FRAG="$ENABLE_FRAG" RW_EXIT_ADDR="$ENTRY_V6_ADDR" RW_GEO_CATRU="${GEO_HAS_CATRU:-true}" RW_SID_BRIDGE="$(openssl rand -hex 8)" RW_BRIDGE_PATH="/$(openssl rand -hex 8)/" \
+  RW_DIRECT_V4="$DIRECT_V4" RW_EXIT_FILE="$EXIT_FILE" RW_ENTRY_RU_DIRECT="$ENTRY_RU_DIRECT" RW_ENTRY_EXTRA_DIRECT="$ENTRY_EXTRA_DIRECT" RW_CASCADE_TEMPLATE="$CASCADE_TEMPLATE" RW_TEMPLATE_KIND="$TEMPLATE_KIND" RW_TEMPLATE_PROXY_DOMAINS="$TEMPLATE_PROXY_DOMAINS" RW_FRAG="$ENABLE_FRAG" RW_EXIT_ADDR="$ENTRY_V6_ADDR" RW_GEO_CATRU="${GEO_HAS_CATRU:-true}" RW_SID_BRIDGE="$(openssl rand -hex 8)" RW_BRIDGE_PATH="/$(openssl rand -hex 8)/" \
   RW_NODE_NAME="$NODE_NAME" RW_NODE_DOMAIN="$NODE_DOMAIN" RW_NODE_ADDRESS="$NODE_ADDRESS" \
   RW_NODE_PORT="$NODE_PORT" RW_HOST_PREFIX="$HOST_PREFIX" RW_TAG_SUFFIX="$TAG_SUFFIX" \
   RW_SNI_DONOR="$SNI_DONOR" RW_SELF_STEAL="$SELF_STEAL" RW_PORT_SS_LOCAL="$PORT_SS_LOCAL" \
