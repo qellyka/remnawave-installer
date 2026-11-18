@@ -344,7 +344,7 @@ case "$WARP_ANS" in
   2) WARP_MODE="selected" ;;
   *) WARP_MODE="off" ;;
 esac
-WARP_DOMAINS_DEFAULT="openai.com,chatgpt.com,oaistatic.com,oaiusercontent.com,anthropic.com,claude.ai,claude.com,gemini.google.com,aistudio.google.com,generativelanguage.googleapis.com,notebooklm.google.com,perplexity.ai,grok.com,x.ai,netflix.com,nflxvideo.net,spotify.com"
+WARP_DOMAINS_DEFAULT="openai.com,chatgpt.com,oaistatic.com,oaiusercontent.com,anthropic.com,claude.ai,claude.com,gemini.google.com,gemini.google,bard.google.com,aistudio.google.com,makersuite.google.com,ai.google.dev,generativelanguage.googleapis.com,notebooklm.google.com,notebooklm.google,labs.google,deepmind.google,clients6.google.com,jnn-pa.googleapis.com,accounts.google.com,gstatic.com,googleusercontent.com,apis.google.com,ogs.google.com,play.google.com,perplexity.ai,grok.com,x.ai,netflix.com,nflxvideo.net,spotify.com"
 WARP_DOMAINS=""
 WARP_LICENSE=""
 if [[ "$WARP_MODE" != "off" ]]; then
